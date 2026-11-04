@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="fr"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>ProspectBois</title>
+<meta name="theme-color" content="#1a2e1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ProspectBois">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head><body class="locked">
+<div id="map"></div>
+
+<div class="top">
+  <button class="rond" id="btnCouches" aria-label="Couches" title="Couches">🗺️</button>
+  <button class="rond" id="btnGps" aria-label="Ma position" title="Ma position">📍</button>
+  <button class="rond" id="btnDossiers" aria-label="Dossiers" title="Dossiers">📁</button>
+  <button class="rond" id="btnCompte" aria-label="Compte" title="Compte">👤<span id="pastille" class="pastille"></span></button>
+</div>
+<div id="bandeau" class="bandeau" hidden></div>
+
+<div class="bas">
+  <div id="outils" class="outils" hidden>
+    <button data-outil="info"><span>ℹ️</span>Infos</button>
+    <button data-outil="mesure"><span>📏</span>Mesure</button>
+    <button data-outil="repere"><span>📌</span>Repère</button>
+    <button data-outil="trace"><span>🥾</span>Trace</button>
+    <button data-outil="polygone"><span>⬠</span>Polygone</button>
+    <button data-outil="saisie" class="saisie"><span>📝</span>Saisie</button>
+  </div>
+  <button id="cadenas" class="cadenas" aria-label="Déverrouiller la saisie"><span id="cadIcone">🔒</span></button>
+</div>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-tete"><b id="sheetTitre"></b><button id="sheetFermer" aria-label="Fermer">✕</button></div>
+  <div id="sheetCorps" class="sheet-corps"></div>
+</div>
+
+<div id="login" class="login">
+  <div class="login-box">
+    <div class="logo">🌲</div><h1>ProspectBois</h1>
+    <div id="lNomWrap" hidden><label for="lNom">Prénom et nom</label><input id="lNom" autocomplete="name"></div>
+    <label for="lId">Identifiant</label><input id="lId" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false">
+    <label for="lMdp">Mot de passe</label><input id="lMdp" type="password" autocomplete="current-password">
+    <div id="lPlus" hidden>
+      <label for="lMdp2">Confirmer le mot de passe</label><input id="lMdp2" type="password" autocomplete="new-password">
+      <label for="lInvit">Code d'invitation</label><input id="lInvit" autocomplete="off" autocapitalize="none">
+    </div>
+    <div id="lContact" hidden>
+      <label for="lEmail">E-mail professionnel</label><input id="lEmail" type="email" autocomplete="email" autocapitalize="none">
+      <label for="lTel">Téléphone professionnel</label><input id="lTel" type="tel" autocomplete="tel">
+    </div>
+    <div id="lApiWrap" hidden><label for="lApi">URL de l'API</label><input id="lApi" type="url" autocomplete="off"></div>
+    <button id="lOk" class="btn">Connexion</button>
+    <button id="lSwitch" class="lien">Créer un compte</button>
+    <div id="lErr" class="err"></div>
+  </div>
+</div>
+<div id="toast" class="toast"></div>
+<input type="file" id="fichierPhoto" accept="image/*" capture="environment" multiple hidden>
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/jszip.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body></html>
