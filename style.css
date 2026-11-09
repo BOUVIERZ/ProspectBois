@@ -83,3 +83,47 @@ select option{background:#21331f;}
 .etiquette{background:rgba(26,46,26,.82);border:0;color:#fff;font-size:10.5px;border-radius:5px;padding:1px 5px;box-shadow:none;}
 .etiquette::before{display:none;}
 .mesure-lbl{background:#fff;color:#222;border:0;font-weight:700;font-size:12px;}
+
+/* Types de parcelles, dossiers et suivi */
+.types{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;}
+.types button{border:2px solid var(--c);background:transparent;color:#fff;border-radius:16px;padding:6px 10px;font-size:12.5px;}
+.types button.on{background:var(--c);font-weight:700;}
+.types.petit button{padding:4px 8px;font-size:11.5px;}
+.chips{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;margin:6px 0;}
+.chip-type{display:inline-block;border-radius:10px;padding:2px 8px;font-size:11.5px;background:var(--c);color:#fff;font-weight:600;}
+.chips .nb{font-size:12px;margin-right:6px;}
+.legende{margin:2px 0 10px;}
+.boutons{display:flex;gap:6px;flex-wrap:wrap;}
+.boutons .btn{flex:1 1 140px;}
+.filtres{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 4px;}
+.filtres button{border:1px solid rgba(255,255,255,.25);background:transparent;border-radius:16px;padding:6px 11px;font-size:13px;}
+.filtres button.on{background:var(--feuille);border-color:var(--feuille);color:#10210f;font-weight:600;}
+.brouillon{font-size:11px;color:#f4c46a;}
+.relance{color:#ffb15c;font-weight:700;}
+.sous-dossier{border-left:4px solid var(--c);padding-left:10px;margin:12px 0 16px;}
+.sd-tete{font-weight:700;margin-bottom:8px;}
+.carte-suivi{background:rgba(255,255,255,.05);border:1px solid var(--ligne);border-radius:11px;padding:10px 11px;margin-bottom:8px;}
+.carte-suivi .t b{display:block;}.carte-suivi .t small{color:var(--sauge);}
+.etat{font-size:13px;margin:6px 0 4px;}
+.etat .relance{margin-left:8px;font-size:12px;}
+.etat.fin b{color:#8fe3a4;}.etat.refus b{color:#ff9d90;}
+.prog{height:6px;background:rgba(255,255,255,.12);border-radius:4px;overflow:hidden;}
+.prog i{display:block;height:100%;background:var(--feuille);}
+.carte-suivi .boutons{margin-top:8px;}
+.mini{border:0;border-radius:8px;padding:7px 9px;font-size:12.5px;background:rgba(255,255,255,.1);}
+.btn2.mini{flex:1 1 auto;}
+.detail{margin-top:10px;border-top:1px solid var(--ligne);padding-top:10px;}
+.liens{display:flex;gap:14px;margin-top:6px;font-size:13.5px;}.liens a{color:#8fc7ff;}
+.etapes{margin:6px 0 12px;}
+.etape{display:grid;grid-template-columns:24px 1fr;gap:4px 8px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.07);}
+.etape .ico{width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.35);display:flex;align-items:center;justify-content:center;font-size:12px;}
+.etape.fait .ico{background:var(--feuille);border-color:var(--feuille);color:#10210f;font-weight:700;}
+.etape.bloque{opacity:.45;}
+.etape .lib{font-size:13.5px;}.etape .lib small{display:block;color:var(--sauge);font-size:11.5px;}
+.etape>input,.etape>.choix,.etape>.mini{grid-column:2;}
+.etape>input{padding:7px 9px;}
+.choix.petit button{padding:6px 11px;font-size:13px;}
+.note-suivi{background:rgba(0,0,0,.2);border-radius:8px;padding:7px 9px;margin-bottom:5px;font-size:13.5px;}
+.note-suivi small{display:block;color:var(--sauge);}
+textarea{resize:vertical;}
+.abouti{font-size:11px;color:#8fe3a4;font-weight:700;}.nonabouti{font-size:11px;color:#ffb3a9;font-weight:700;}
