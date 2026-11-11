@@ -556,12 +556,23 @@ const SOURCES_NATURE = [
   ["rnn", "Réserve naturelle nationale"], ["rnc", "Réserve naturelle de Corse"], ["rncf", "Réserve de chasse et de faune sauvage"]
 ];
 const dedoublonner = l => { const s = new Set(); return l.filter(z => { const k = z.type + "|" + z.nom; if (s.has(k)) return false; s.add(k); return true; }); };
+// Liens INPN reconstruits a partir de l'identifiant : les liens fournis par le service sont parfois perimes.
+function liensFiche(res, x) {
+  const id = String(x.id_mnhn || x.sitecode || "").trim();
+  if (/^znieff/.test(res) && /^\d+$/.test(id)) return { url: "https://inpn.mnhn.fr/zone/znieff/" + id, pdf: "https://inpn.mnhn.fr/docs/ZNIEFF/znieffpdf/" + id + ".pdf" };
+  if (/^natura/.test(res) && /^FR\d+$/.test(id)) return { url: "https://inpn.mnhn.fr/site/natura2000/" + id, pdf: "https://inpn.mnhn.fr/docs/natura2000/fsdpdf/" + id + ".pdf" };
+  const u = x.url || x.url_fiche || "";
+  return { url: /^https?:/.test(u) ? u.replace(/^http:/, "https:") : "", pdf: "" };
+}
+// Un service qui ne repond pas est retente une fois avant d'etre signale.
+async function getJson2(url) { try { return await getJson(url); } catch (e) { await new Promise(r => setTimeout(r, 800)); return getJson(url); } }
 async function chargerZonage(p) {
   const g = geomParam(geomRequete(p)), manquants = [], zones = [];
+  let aPlu = false;
   const nature = SOURCES_NATURE.map(async ([res, lib]) => {
     try {
-      const r = await getJson(`${APICARTO}/nature/${res}?geom=${g}`);
-      (r.features || []).forEach(f => { const x = f.properties || {}; zones.push({ type: lib, nom: x.sitename || x.nom || x.nom_site || "", url: x.url || x.url_fiche || "", reglementaire: true }); });
+      const r = await getJson2(`${APICARTO}/nature/${res}?geom=${g}`);
+      (r.features || []).forEach(f => { const x = f.properties || {}; zones.push(Object.assign({ type: lib, nom: x.sitename || x.nom || x.nom_site || "", reglementaire: true }, liensFiche(res, x))); });
     } catch (e) { manquants.push(lib); }
   });
   const gpus = [
@@ -572,7 +583,8 @@ async function chargerZonage(p) {
     ["assiette-sup-s", "Servitude d'utilité publique", x => [x.suptype, x.nomsuplitt].filter(Boolean).join(" : "), false]
   ].map(async ([res, lib, nomf]) => {
     try {
-      const r = await getJson(`${APICARTO}/gpu/${res}?geom=${g}`);
+      const r = await getJson2(`${APICARTO}/gpu/${res}?geom=${g}`);
+      if (res === "zone-urba" && (r.features || []).length) aPlu = true;
       (r.features || []).forEach(f => {
         const x = f.properties || {};
         const ebc = res === "prescription-surf" && (String(x.typepsc) === "01" || /espaces?\s+bois/i.test(String(x.libelle || "") + String(x.txt || "")));
@@ -581,7 +593,8 @@ async function chargerZonage(p) {
     } catch (e) { manquants.push(lib); }
   });
   await Promise.all(nature.concat(gpus));
-  p.zonage = dedoublonner(zones); p.zonageManquants = manquants;
+  // Une commune couverte par un PLU n'a pas de carte communale : ce service n'est alors pas utile.
+  p.zonage = dedoublonner(zones); p.zonageManquants = manquants.filter(m => !(aPlu && m === "Carte communale"));
   return p;
 }
 async function chargerProprietaire(p) {
@@ -595,7 +608,7 @@ async function chargerProprietaire(p) {
 function htmlZonage(p) {
   if (p.etat !== "ok") return `<p class="note">Sera identifié au retour du réseau.</p>`;
   if (p.zonageManquants === null) return `<p class="note">Recherche en cours…</p>`;
-  let h = p.zonage.length ? p.zonage.map(z => `<div class="zone"><b>${esc(z.type)}</b>${z.nom ? "<br>" + esc(z.nom) : ""}${/^https?:/.test(z.url || "") ? `<br><a href="${esc(z.url)}" target="_blank" rel="noopener">Voir la fiche</a>` : ""}</div>`).join("") : `<p class="note">Aucun zonage trouvé dans les bases interrogées.</p>`;
+  let h = p.zonage.length ? p.zonage.map(z => `<div class="zone"><b>${esc(z.type)}</b>${z.nom ? "<br>" + esc(z.nom) : ""}${/^https?:/.test(z.url || "") ? `<br><a href="${esc(z.url)}" target="_blank" rel="noopener">Voir la fiche</a>` : ""}${z.pdf ? ` · <a href="${esc(z.pdf)}" target="_blank" rel="noopener">Fiche PDF</a>` : ""}</div>`).join("") : `<p class="note">Aucun zonage trouvé dans les bases interrogées.</p>`;
   if (p.zonageManquants.length) h += `<div class="alerte">Non vérifié, service injoignable : ${esc(p.zonageManquants.join(", "))}.</div>`;
   h += `<p class="note">Résultat automatique à confirmer. Les arrêtés de protection de biotope ne sont pas interrogés directement : ils n'apparaissent que s'ils figurent dans les servitudes du Géoportail de l'Urbanisme.</p>`;
   return h;
