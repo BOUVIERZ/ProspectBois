@@ -607,7 +607,15 @@ async function chercherParcelleCode() {
   let q = `${APICARTO}/cadastre/parcelle?source_ign=PCI&code_insee=${communeRech.insee}&section=${sec.padStart(2, "0")}&numero=${num.padStart(4, "0")}`;
   if (pre) q += `&com_abs=${pre.padStart(3, "0")}`;
   let r;
-  try { r = await getJson2(q); } catch (e) { res.innerHTML = `<p class="err">Cadastre injoignable : vérifiez le réseau.</p>`; return; }
+  try { r = await getJson2(q); } catch (e) {
+    // API Carto en panne : meme recherche sur le service cadastre de la Geoplateforme.
+    let filtre = `code_insee='${communeRech.insee}' AND section='${sec.padStart(2, "0")}' AND numero='${num.padStart(4, "0")}'`;
+    if (pre) filtre += ` AND com_abs='${pre.padStart(3, "0")}'`;
+    try { r = await getJson(`${GEOPF}/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle&OUTPUTFORMAT=application/json&COUNT=20&SRSNAME=EPSG:4326&CQL_FILTER=${encodeURIComponent(filtre)}`, 20000); }
+    catch (e2) { res.innerHTML = `<p class="err">${esc(msgCadastre(e))}.</p>`; return; }
+    const remettre = c => typeof c[0] === "number" ? (c[0] > c[1] ? [c[1], c[0]] : c) : c.map(remettre);
+    (r.features || []).forEach(f => { if (f.geometry) f.geometry = { type: f.geometry.type, coordinates: remettre(f.geometry.coordinates) }; });
+  }
   const fs = (r.features || []).filter(f => f.geometry);
   if (!fs.length) { res.innerHTML = `<p class="err">Parcelle ${esc(sec)} ${esc(num)} introuvable à ${esc(communeRech.nom)}. Vérifiez la section, ou indiquez le préfixe d'une commune déléguée.</p>`; return; }
   const ouvrir = f => {
@@ -814,17 +822,48 @@ function dessinerAnnots() {
 }
 
 // ---- Interrogation des services publics -----------------------
-async function getJson(url) {
-  const c = new AbortController(), t = setTimeout(() => c.abort(), 15000);
-  try { const r = await fetch(url, { signal: c.signal }); if (!r.ok) throw new Error("http " + r.status); return await r.json(); } finally { clearTimeout(t); }
+async function getJson(url, delai) {
+  const c = new AbortController(), t = setTimeout(() => c.abort(), delai || 15000);
+  try { const r = await fetch(url, { signal: c.signal }); if (!r.ok) throw Object.assign(new Error("http " + r.status), { status: r.status }); return await r.json(); } finally { clearTimeout(t); }
+}
+// Message d'erreur selon la cause : pas de reseau, ou service IGN en panne.
+function msgCadastre(e) {
+  if (!navigator.onLine) return "Pas de réseau : cadastre inaccessible";
+  if (e && e.status) return "Service cadastre de l'IGN en panne (erreur " + e.status + "). Réessayez dans quelques minutes";
+  if (e && e.name === "AbortError") return "Le service cadastre de l'IGN ne répond pas. Réessayez dans un instant";
+  return "Service cadastre de l'IGN inaccessible. Réessayez dans un instant";
 }
 const geomParam = g => encodeURIComponent(JSON.stringify(g));
 // Retourne la parcelle, null si aucune, et leve une erreur si le service est injoignable.
 async function chercherParcelle(ll) {
   const pt = { type: "Point", coordinates: [+ll.lng.toFixed(7), +ll.lat.toFixed(7)] };
-  const r = await getJson(`${APICARTO}/cadastre/parcelle?source_ign=PCI&geom=${geomParam(pt)}`);
-  const f = (r.features || [])[0];
+  let f;
+  try {
+    const r = await getJson2(`${APICARTO}/cadastre/parcelle?source_ign=PCI&geom=${geomParam(pt)}`);
+    f = (r.features || [])[0];
+  } catch (e) {
+    // API Carto en panne : on interroge directement le service cadastre de la Geoplateforme.
+    try { f = await parcelleWfs(ll); } catch (e2) { throw e; }
+  }
   return f ? depuisFeature(f, ll) : null;
+}
+function dansPolygone(x, y, anneau) {
+  let d = false;
+  for (let i = 0, j = anneau.length - 1; i < anneau.length; j = i++) {
+    const [xi, yi] = anneau[i], [xj, yj] = anneau[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) d = !d;
+  }
+  return d;
+}
+async function parcelleWfs(ll) {
+  const e = .0004, b = [ll.lat - e, ll.lng - e, ll.lat + e, ll.lng + e].map(v => v.toFixed(6)).join(",");
+  const r = await getJson(`${GEOPF}/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle&OUTPUTFORMAT=application/json&COUNT=50&BBOX=${b},urn:ogc:def:crs:EPSG::4326`, 20000);
+  const fs = (r.features || []).filter(f => f.geometry);
+  // En France metropolitaine la latitude est toujours superieure a la longitude : on remet les coordonnees dans l'ordre GeoJSON si besoin.
+  const remettre = c => typeof c[0] === "number" ? (c[0] > c[1] ? [c[1], c[0]] : c) : c.map(remettre);
+  fs.forEach(f => { f.geometry = { type: f.geometry.type, coordinates: remettre(f.geometry.coordinates) }; });
+  const polys = g => g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
+  return fs.find(f => polys(f.geometry).some(pl => dansPolygone(ll.lng, ll.lat, pl[0]))) || null;
 }
 function depuisFeature(f, ll) {
   const p = f.properties || {};
@@ -933,7 +972,7 @@ let parcelleInfo = null;
 async function infosParcelle(ll) {
   bandeau("Recherche de la parcelle…");
   let p;
-  try { p = await chercherParcelle(ll); } catch (e) { bandeau(null); toast("Cadastre injoignable : réseau insuffisant", 1); return; }
+  try { p = await chercherParcelle(ll); } catch (e) { bandeau(null); toast(msgCadastre(e), 1); return; }
   bandeau(null);
   if (outil !== "info") return;
   if (!p) { toast("Aucune parcelle à cet endroit", 1); return; }
@@ -998,7 +1037,7 @@ async function identifierOuProvisoire(ll) {
   catch (e) {
     const id = "NON-IDENTIFIEE-" + codeDossier();
     p = { idu: id, insee: "", commune: "", prefixe: "", section: "", numero: "", contenance: 0, lat: +ll.lat.toFixed(6), lng: +ll.lng.toFixed(6), geom: null, proprietaires: [], proprioEtat: "attente", zonage: [], zonageManquants: null, etat: "a_identifier" };
-    toast("Pas de réseau : point conservé, parcelle identifiée plus tard");
+    toast((navigator.onLine ? "Service cadastre de l'IGN indisponible" : "Pas de réseau") + " : point conservé, parcelle identifiée plus tard");
   }
   return p;
 }
