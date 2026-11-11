@@ -248,87 +248,283 @@ async function demarrer() {
 }
 
 // ---- Carte et couches -----------------------------------------
+// Catalogue tire de la configuration publique de cartes.gouv.fr (Geoplateforme IGN).
+const PATRINAT = "Données INPN / PatriNat (MNHN), diffusées par la Géoplateforme.";
+const THEMES_COUCHES = ["Cadastre", "Forêt", "Urbanisme", "Natura 2000 et espaces protégés", "Relief", "Réseaux et limites"];
+const FONDS = [
+  { id: "ortho", nom: "Photographies aériennes", w: ["ORTHOIMAGERY.ORTHOPHOTOS", "normal", "image/jpeg", "PM_0_19"] },
+  { id: "plan", nom: "Plan IGN", w: ["GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2", "normal", "image/png", "PM_0_19"] },
+  { id: "irc", nom: "Infrarouge couleur", w: ["ORTHOIMAGERY.ORTHOPHOTOS.IRC", "normal", "image/jpeg", "PM_6_19"] },
+  { id: "aucun", nom: "Aucun fond" }
+];
+if (CFG.ignScanKey) FONDS.splice(2, 0, { id: "scan", nom: "Carte IGN (SCAN 25)", w: ["GEOGRAPHICALGRIDSYSTEMS.MAPS", "normal", "image/jpeg", "PM_0_18"], base: GEOPF + "/private/wmts?apikey=" + encodeURIComponent(CFG.ignScanKey) + "&" });
+const LEG = GEOPF + "/annexes/ressources/legendes/";
+const legWms = n => GEOPF + "/wms-v/ows?service=WMS&version=1.3.0&request=GetLegendGraphic&format=image%2Fpng&width=20&height=20&layer=" + n;
+const CATALOGUE = [
+  // Cadastre
+  { id: "cad_pci", t: 0, nom: "Parcelles cadastrales (PCI, à jour)", w: ["CADASTRALPARCELS.PARCELLAIRE_EXPRESS", "PCI vecteur", "image/png", "PM_0_19"], d: "Plan cadastral informatisé mis à jour chaque trimestre (Parcellaire Express). C'est la référence utilisée pour identifier les parcelles." },
+  { id: "cad_1318", t: 0, nom: "Parcelles cadastrales 2013-2018", w: ["CADASTRALPARCELS.PARCELS", "bdparcellaire", "image/png", "PM_0_20"], d: "BD Parcellaire 2013-2018, issue des plans scannés et numériques, recalée sur la photo aérienne. C'est la couche « Cadastre » d'Iphigénie : souvent mieux calée en forêt de montagne." },
+  { id: "cad_0813", t: 0, nom: "Parcelles cadastrales 2008-2013", w: ["CADASTRALPARCELS.HISTO.2008-2013.PARCELS", "bdparcellaire", "image/png", "PM_0_20"], d: "Ancienne édition de la BD Parcellaire, utile pour retrouver un ancien découpage." },
+  { id: "cad_sect", t: 0, nom: "Sections cadastrales", w: ["CADASTRAL.PARCELS.SECTIONS", "normal", "image/png", "PM_13_18"], d: "Limites et lettres des sections (BD Parcellaire)." },
+  { id: "cad_decal", t: 0, nom: "Décalage entre les deux cadastres", w: ["CADASTRALPARCELS.HEATMAP", "DECALAGE DE LA REPRESENTATION CADASTRALE", "image/png", "PM_6_18"], d: "Montre où le cadastre à jour (PCI) et la BD Parcellaire 2013-2018 divergent : plus la couleur est chaude, plus l'écart est fort.", leg: LEG + "CADASTRALPARCELS.HEATMAP-legend.png" },
+  // Foret
+  { id: "foret", t: 1, nom: "Forêts publiques", w: ["FORETS.PUBLIQUES", "FORETS PUBLIQUES ONF", "image/png", "PM_3_16"], d: "Forêts domaniales et non domaniales (communales, sectionales…) gérées par l'ONF.", leg: LEG + "onf_forets_publiques.png" },
+  { id: "bdforet", t: 1, nom: "Carte forestière (BD Forêt V2)", w: ["LANDCOVER.FORESTINVENTORY.V2", "normal", "image/png", "PM_6_16"], d: "32 types de formations végétales (essences dominantes, structure).", leg: LEG + "LANDCOVER.FORESTINVENTORY.V2-legend.png" },
+  { id: "masque", t: 1, nom: "Masque forêt 2021-2023", w: ["IGNF_MASQUE-FORET.2021-2023", "normal", "image/png", "PM_6_16"], d: "Surfaces boisées récentes, issues de la photo aérienne et du Lidar.", leg: LEG + "IGNF_MASQUE-FORET_2021-2023-legend.png" },
+  { id: "anciennes", t: 1, nom: "Forêts anciennes", w: ["IGNF_FORETS-ANCIENNES", "normal", "image/png", "PM_6_16"], d: "Boisées depuis au moins le milieu du XIXe siècle (cartes d'état-major).", leg: LEG + "IGNF_FORETS-ANCIENNES-legend.png" },
+  { id: "acc_porteur", t: 1, nom: "Accessibilité des forêts au porteur", w: ["IGNF_ACCESSIBILITE-PHYSIQUE-FORETS-PORTEUR", "normal", "image/png", "PM_6_16"], d: "Accessibilité physique des forêts au porteur forestier (pente, desserte, obstacles).", leg: LEG + "AccessFor.png" },
+  { id: "acc_skidder", t: 1, nom: "Accessibilité des forêts au skidder", w: ["IGNF_ACCESSIBILITE-PHYSIQUE-FORETS-SKIDDER", "normal", "image/png", "PM_6_16"], d: "Accessibilité physique des forêts au débardage par skidder.", leg: LEG + "AccessFor.png" },
+  { id: "regions_for", t: 1, nom: "Régions forestières nationales", w: ["LANDCOVER.FORESTAREAS", "normal", "image/png", "PM_6_16"], d: "Zones homogènes de types de forêt et de paysage (IGN)." },
+  // Urbanisme (Geoportail de l'Urbanisme)
+  { id: "du", t: 2, nom: "Documents d'urbanisme (PLU, POS, CC)", g: "du", d: "Emprise des documents d'urbanisme publiés : PLU, PLUi, POS, cartes communales." },
+  { id: "urba", t: 2, nom: "Zonages (PLU, carte communale)", g: "zone_secteur", d: "Zones U, AU, A, N des PLU et secteurs des cartes communales." },
+  { id: "presc", t: 2, nom: "Prescriptions (toutes)", g: "prescription", d: "Prescriptions des documents d'urbanisme : espaces boisés classés, éléments de paysage, emplacements réservés…" },
+  { id: "ebc", t: 2, nom: "Espaces boisés classés (EBC)", g: "prescription", f: "typepsc='01'", d: "Seulement les espaces boisés classés (prescription de type 01). Tout défrichement y est interdit et les coupes peuvent être soumises à déclaration préalable." },
+  { id: "infos", t: 2, nom: "Informations d'urbanisme", g: "info", d: "Périmètres d'information : droit de préemption, zones de risques, secteurs particuliers…" },
+  { id: "sup", t: 2, nom: "Servitudes d'utilité publique", g: "sup", d: "Toutes catégories : captages d'eau (AS1), monuments historiques (AC1), forêts de protection (A7), lignes électriques (I4)…" },
+  { id: "scot", t: 2, nom: "Schémas de cohérence territoriale (SCoT)", g: "scot", d: "Périmètres des SCoT." },
+  { id: "psmv", t: 2, nom: "Plans de sauvegarde (PSMV)", g: "psmv", d: "Périmètres des plans de sauvegarde et de mise en valeur." },
+  { id: "psmv_z", t: 2, nom: "Zonages des PSMV", g: "zone_secteur_psmv", d: "Zonages des plans de sauvegarde et de mise en valeur." },
+  { id: "psmv_p", t: 2, nom: "Prescriptions des PSMV", g: "prescription_psmv", d: "Prescriptions des plans de sauvegarde et de mise en valeur." },
+  { id: "psmv_i", t: 2, nom: "Informations des PSMV", g: "info_psmv", d: "Périmètres d'information des plans de sauvegarde." },
+  { id: "du_emprise", t: 2, nom: "Emprise des documents (petite échelle)", g: "document", d: "Vue d'ensemble des communes couvertes, visible de loin." },
+  // Natura 2000 et espaces proteges
+  { id: "n2000_h", t: 3, nom: "Natura 2000 : Directive Habitats (ZSC, SIC)", p: "SIC" },
+  { id: "n2000_o", t: 3, nom: "Natura 2000 : Directive Oiseaux (ZPS)", p: "ZPS" },
+  { id: "znieff1", t: 3, nom: "ZNIEFF de type 1", p: "ZNIEFF1" },
+  { id: "znieff2", t: 3, nom: "ZNIEFF de type 2", p: "ZNIEFF2" },
+  { id: "pn", t: 3, nom: "Parcs nationaux", p: "PN" },
+  { id: "ripn", t: 3, nom: "Réserves intégrales de parc national", p: "RIPN" },
+  { id: "pnr", t: 3, nom: "Parcs naturels régionaux", p: "PNR" },
+  { id: "rnn", t: 3, nom: "Réserves naturelles nationales", p: "RNN" },
+  { id: "pprnn", t: 3, nom: "Périmètres de protection des réserves naturelles", p: "PPRNN" },
+  { id: "rnr", t: 3, nom: "Réserves naturelles régionales", p: "RNR" },
+  { id: "rb", t: 3, nom: "Réserves biologiques (ONF)", p: "RB" },
+  { id: "rncfs", t: 3, nom: "Réserves nationales de chasse et de faune sauvage", p: "RNCFS" },
+  { id: "apb", t: 3, nom: "Arrêtés de protection de biotope", p: "APB" },
+  { id: "aphn", t: 3, nom: "Arrêtés de protection d'habitats naturels", p: "APHN" },
+  { id: "apg", t: 3, nom: "Arrêtés de protection de géotope", p: "APG" },
+  { id: "cen", t: 3, nom: "Sites des conservatoires d'espaces naturels", p: "CEN" },
+  { id: "ramsar", t: 3, nom: "Zones humides Ramsar", p: "RAMSAR" },
+  { id: "bios", t: 3, nom: "Réserves de biosphère", p: "BIOS" },
+  { id: "inpg", t: 3, nom: "Patrimoine géologique (INPG)", p: "INPG" },
+  { id: "geoparc", t: 3, nom: "Géoparcs", p: "GEOPARC" },
+  { id: "rnc", t: 3, nom: "Réserves naturelles de Corse", p: "RNC" },
+  { id: "cdl", t: 3, nom: "Conservatoire du littoral", p: "CDL" },
+  // Relief
+  { id: "pentes", t: 4, nom: "Carte des pentes (montagne)", w: ["GEOGRAPHICALGRIDSYSTEMS.SLOPES.MOUNTAIN", "normal", "image/png", "PM_0_17"], d: "Zones de pente supérieure à 30°, 35°, 40° et 45° (BD ALTI 5 m). Utile pour juger l'exploitabilité." },
+  { id: "courbes", t: 4, nom: "Courbes de niveau", w: ["ELEVATION.CONTOUR.LINE", "normal", "image/png", "PM_6_18"], d: "Courbes de niveau issues du RGE ALTI." },
+  { id: "estompage", t: 4, nom: "Estompage du relief", w: ["ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW", "estompage_grayscale", "image/png", "PM_0_15"], d: "Ombrage du relief, à superposer au plan ou à la photo." },
+  { id: "estompage_hr", t: 4, nom: "Estompage haute résolution", w: ["IGNF_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW", "normal", "image/png", "PM_6_17"], d: "Ombrage détaillé calculé sur le RGE ALTI : fait ressortir talwegs, pistes et ruptures de pente." },
+  // Reseaux et limites
+  { id: "hydro", t: 5, nom: "Réseau hydrographique", w: ["HYDROGRAPHY.HYDROGRAPHY", "normal", "image/png", "PM_6_18"], d: "Cours d'eau et plans d'eau (BD TOPO)." },
+  { id: "routes", t: 5, nom: "Routes et chemins", w: ["TRANSPORTNETWORKS.ROADS", "normal", "image/png", "PM_6_18"], d: "Réseau routier, dont routes et chemins forestiers (BD TOPO)." },
+  { id: "limites", t: 5, nom: "Limites administratives", w: ["LIMITES_ADMINISTRATIVES_EXPRESS.LATEST", "normal", "image/png", "PM_6_16"], d: "Limites des communes, départements et régions.", leg: LEG + "LIMITES_ADMINISTRATIVES_EXPRESS.LATEST-legend.png" }
+];
+CATALOGUE.forEach(c => {
+  if (c.p) { c.w = ["Patrinat_" + c.p, "normal", "image/png", "PM_6_16"]; c.d = c.d || PATRINAT; }
+  if (c.g) { c.leg = c.leg || legWms(c.g); c.zmin = c.zmin || (c.g === "document" ? 0 : 12); c.src = "Géoportail de l'Urbanisme"; }
+  if (c.w) { const m = /PM_(\d+)_(\d+)/.exec(c.w[3]); c.zmin = c.zmin || +m[1]; c.zmax = +m[2]; }
+  c.op = c.t === 0 ? 1 : c.t === 4 && c.id !== "courbes" ? .5 : .7;
+  c.src = c.src || (c.p ? "INPN / PatriNat" : "IGN, Géoplateforme");
+});
+const DEF_COUCHE = id => CATALOGUE.find(c => c.id === id) || FONDS.find(c => c.id === id);
+
 function wmts(layer, style, fmt, set, opts, base) {
   return L.tileLayer((base || GEOPF + "/wmts?") + "SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=" + layer + "&STYLE=" + encodeURIComponent(style) + "&TILEMATRIXSET=" + set + "&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=" + fmt, Object.assign({ maxZoom: 20, attribution: "IGN-F/Géoplateforme" }, opts));
 }
-function gpu(layers) {
-  return L.tileLayer.wms(GEOPF + "/wms-v/ows", { layers, format: "image/png", transparent: true, version: "1.3.0", maxZoom: 20, attribution: "Géoportail de l'Urbanisme" });
+function gpu(layers, filtre) {
+  const o = { layers, format: "image/png", transparent: true, version: "1.3.0", maxZoom: 20, attribution: "Géoportail de l'Urbanisme" };
+  if (filtre) o.CQL_FILTER = filtre;
+  return L.tileLayer.wms(GEOPF + "/wms-v/ows", o);
 }
-const COUCHES = [];
-function definirCouches() {
-  COUCHES.push(
-    { id: "sat", nom: "Satellite", on: true, op: 1, l: wmts("ORTHOIMAGERY.ORTHOPHOTOS", "normal", "image/jpeg", "PM", { maxNativeZoom: 19 }) },
-    { id: "ign", nom: "Plan IGN", on: false, op: 1, l: wmts("GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2", "normal", "image/png", "PM", { maxNativeZoom: 19 }) }
-  );
-  if (CFG.ignScanKey) COUCHES.push({ id: "scan", nom: "Carte IGN (SCAN 25)", on: false, op: 1, l: wmts("GEOGRAPHICALGRIDSYSTEMS.MAPS", "normal", "image/jpeg", "PM", { maxNativeZoom: 16 }, GEOPF + "/private/wmts?apikey=" + encodeURIComponent(CFG.ignScanKey) + "&") });
-  COUCHES.push(
-    { id: "foret", nom: "Forêts publiques", on: false, op: .7, l: wmts("FORETS.PUBLIQUES", "FORETS PUBLIQUES ONF", "image/png", "PM_3_16", { maxNativeZoom: 16, minZoom: 3 }) },
-    { id: "urba", nom: "Urbanisme : zonages PLU", on: false, op: .6, l: gpu("zone_secteur") },
-    { id: "presc", nom: "Urbanisme : prescriptions (dont EBC)", on: false, op: .7, l: gpu("prescription") },
-    { id: "infos", nom: "Urbanisme : informations", on: false, op: .7, l: gpu("info") },
-    { id: "cad", nom: "Cadastre", on: true, op: 1, l: wmts("CADASTRALPARCELS.PARCELLAIRE_EXPRESS", "PCI vecteur", "image/png", "PM", { maxNativeZoom: 19 }) }
-  );
-  // Si le style attendu du cadastre etait refuse, on bascule sur le service WMS.
-  const cad = COUCHES.find(c => c.id === "cad");
-  let bascule = false;
-  cad.l.on("tileerror", () => {
-    if (bascule || !navigator.onLine) return; bascule = true;
-    const wms = L.tileLayer.wms(GEOPF + "/wms-r/wms", { layers: "CADASTRALPARCELS.PARCELLAIRE_EXPRESS", format: "image/png", transparent: true, version: "1.3.0", maxZoom: 20 });
-    const actif = map.hasLayer(cad.l); if (actif) map.removeLayer(cad.l);
-    cad.l = wms; if (actif) wms.addTo(map).setOpacity(cad.op);
-  });
+// Couche Leaflet creee a la premiere utilisation.
+function coucheLeaflet(c, fond) {
+  if (c.l) return c.l;
+  if (c.g) {
+    c.l = gpu(c.g, c.f);
+    if (c.f) {
+      // Si le serveur refuse le filtre, on affiche toutes les prescriptions plutot que rien.
+      let bascule = false;
+      c.l.on("tileerror", () => {
+        if (bascule || !navigator.onLine) return; bascule = true;
+        const actif = map.hasLayer(c.l); if (actif) map.removeLayer(c.l);
+        c.l = gpu(c.g); c.secours = true; appliquerCouches();
+        toast("EBC seuls indisponibles : toutes les prescriptions sont affichées (EBC en vert quadrillé)");
+      });
+    }
+  } else {
+    const [lay, style, fmt, set] = c.w, m = /PM_(\d+)_(\d+)/.exec(set);
+    const o = { maxNativeZoom: +m[2], minNativeZoom: +m[1] };
+    if (!fond && +m[1] > 0) o.minZoom = +m[1];
+    c.l = wmts(lay, style, fmt, set, o, c.base);
+    if (c.id === "cad_pci") {
+      // Si le style attendu du cadastre etait refuse, on bascule sur le service WMS.
+      let bascule = false;
+      c.l.on("tileerror", () => {
+        if (bascule || !navigator.onLine) return; bascule = true;
+        const actif = map.hasLayer(c.l); if (actif) map.removeLayer(c.l);
+        c.l = L.tileLayer.wms(GEOPF + "/wms-r/wms", { layers: "CADASTRALPARCELS.PARCELLAIRE_EXPRESS", format: "image/png", transparent: true, version: "1.3.0", maxZoom: 20 });
+        appliquerCouches();
+      });
+    }
+  }
+  return c.l;
 }
-const prefs = () => ls("pb5_couches", {});
+// Preferences : fond, couches affichees (la premiere est au-dessus), prospections de l'equipe.
+function prefs() {
+  let p = ls("pb6_couches", null);
+  if (p) return p;
+  const old = ls("pb5_couches", null);
+  p = { fond: "ortho", actives: [{ id: "cad_1318", op: 1, vis: false }, { id: "cad_pci", op: 1, vis: true }], equipe: true };
+  if (old) {
+    const on = (k, d) => old[k] ? old[k].on : d, op = (k, d) => old[k] && old[k].op ? old[k].op : d;
+    p.fond = on("sat", true) ? "ortho" : on("ign", false) ? "plan" : on("scan", false) && CFG.ignScanKey ? "scan" : "ortho";
+    p.actives = [];
+    [["presc", "presc"], ["infos", "infos"], ["urba", "urba"], ["foret", "foret"]].forEach(([a, b]) => { if (on(a, false)) p.actives.push({ id: b, op: op(a, .7), vis: true }); });
+    p.actives.unshift({ id: "cad_1318", op: 1, vis: false }, { id: "cad_pci", op: op("cad", 1), vis: on("cad", true) });
+    p.equipe = on("equipe", true);
+  }
+  lss("pb6_couches", p);
+  return p;
+}
+function sauverPrefs(p) { lss("pb6_couches", p); appliquerCouches(); }
+let fondActif = null;
 function appliquerCouches() {
+  if (!map) return;
   const p = prefs();
-  COUCHES.forEach((c, i) => {
-    const on = p[c.id] ? p[c.id].on : c.on, op = p[c.id] ? p[c.id].op : c.op;
-    c.on = on; c.op = op; c.l.setOpacity(op); c.l.setZIndex(i + 1);
-    if (on && !map.hasLayer(c.l)) c.l.addTo(map);
-    if (!on && map.hasLayer(c.l)) map.removeLayer(c.l);
+  const f = FONDS.find(x => x.id === p.fond) || FONDS[0];
+  FONDS.forEach(x => { if (x.l && x !== f && map.hasLayer(x.l)) map.removeLayer(x.l); });
+  if (f.w) { const l = coucheLeaflet(f, true); l.setZIndex(1); if (!map.hasLayer(l)) l.addTo(map); }
+  fondActif = f;
+  const vues = new Set();
+  p.actives.forEach((a, i) => {
+    const c = DEF_COUCHE(a.id); if (!c || !c.t && c.t !== 0) return;
+    vues.add(c.id);
+    const l = coucheLeaflet(c);
+    if (a.vis) { if (!map.hasLayer(l)) l.addTo(map); l.setOpacity(a.op); l.setZIndex(10 + p.actives.length - i); }
+    else if (map.hasLayer(l)) map.removeLayer(l);
   });
-  const eq = p.equipe ? p.equipe.on : true;
-  if (eq && !map.hasLayer(gProspections)) gProspections.addTo(map);
-  if (!eq && map.hasLayer(gProspections)) map.removeLayer(gProspections);
+  CATALOGUE.forEach(c => { if (c.l && !vues.has(c.id) && map.hasLayer(c.l)) map.removeLayer(c.l); });
+  if (p.equipe && !map.hasLayer(gProspections)) gProspections.addTo(map);
+  if (!p.equipe && map.hasLayer(gProspections)) map.removeLayer(gProspections);
 }
-function sauverPref(id, v) { const p = prefs(); p[id] = Object.assign(p[id] || {}, v); lss("pb5_couches", p); appliquerCouches(); }
 
-let gProspections, gAnnots, gTemp, gSel, carteOk = false;
+let gProspections, gAnnots, gTemp, gSel, gInitiales, carteOk = false;
 function initCarte() {
   if (carteOk) return; carteOk = true;
   const v = ls("pb5_vue", null);
-  map = L.map("map", { zoomControl: false, attributionControl: true, doubleClickZoom: true, tap: false }).setView(v ? v.c : CFG.centre, v ? v.z : CFG.zoom);
+  map = L.map("map", { zoomControl: false, attributionControl: true, doubleClickZoom: true, tap: false, maxZoom: 20 }).setView(v ? v.c : CFG.centre, v ? v.z : CFG.zoom);
   map.attributionControl.setPrefix("");
-  definirCouches();
-  gProspections = L.featureGroup(); gAnnots = L.featureGroup().addTo(map); gTemp = L.featureGroup().addTo(map); gSel = L.featureGroup().addTo(map);
+  gProspections = L.featureGroup(); gInitiales = L.featureGroup().addTo(gProspections);
+  gAnnots = L.featureGroup().addTo(map); gTemp = L.featureGroup().addTo(map); gSel = L.featureGroup().addTo(map);
   appliquerCouches();
+  const zoomCls = () => $("map").classList.toggle("loin", map.getZoom() < 15);
+  zoomCls();
+  map.on("zoomend", zoomCls);
   map.on("moveend", () => lss("pb5_vue", { c: [map.getCenter().lat, map.getCenter().lng], z: map.getZoom() }));
   map.on("click", e => clicCarte(e.latlng));
   map.on("dragstart", () => { if (gpsSuit) { gpsSuit = false; majGpsBtn(); } });
   demarrerGps(false);
 }
 
+// ---- Panneau des couches (presentation inspiree de cartes.gouv.fr) ----
+let ongletCouches = "mes", themeCat = -1, rechCat = "";
+function vignette(f) {
+  if (!f.w) return "";
+  const z = 13, c = map.getCenter(), pt = map.project(c, z).divideBy(256).floor();
+  return (f.base || GEOPF + "/wmts?") + "SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=" + f.w[0] + "&STYLE=" + encodeURIComponent(f.w[1]) + "&TILEMATRIXSET=" + f.w[3] + "&TILEMATRIX=" + z + "&TILEROW=" + pt.y + "&TILECOL=" + pt.x + "&FORMAT=" + f.w[2];
+}
 function panneauCouches() {
   const p = prefs();
-  let h = "";
-  [...COUCHES].reverse().forEach(c => {
-    h += `<div class="couche"><label><input type="checkbox" data-c="${c.id}" ${c.on ? "checked" : ""}>${esc(c.nom)}</label><input type="range" aria-label="Opacité ${esc(c.nom)}" min="10" max="100" step="5" value="${Math.round(c.op * 100)}" data-o="${c.id}"></div>`;
+  const onglets = `<div class="onglets"><button data-ong="mes" class="${ongletCouches === "mes" ? "on" : ""}">Mes couches <span class="nb">${p.actives.length}</span></button><button data-ong="cat" class="${ongletCouches === "cat" ? "on" : ""}">＋ Ajouter des couches</button></div>`;
+  ouvrirSheet("Couches", onglets + `<div id="ongCorps"></div>`);
+  $("sheetCorps").querySelectorAll("[data-ong]").forEach(b => b.onclick = () => { ongletCouches = b.dataset.ong; panneauCouches(); });
+  if (ongletCouches === "mes") rendreMesCouches(); else rendreCatalogue();
+}
+function rendreMesCouches() {
+  const p = prefs(), z = map.getZoom();
+  let h = `<h3>Fond de carte</h3><div class="fonds">${FONDS.map(f => `<button data-fond="${f.id}" class="${p.fond === f.id ? "on" : ""}"><span class="vign">${f.w ? `<img src="${esc(vignette(f))}" alt="" loading="lazy" onerror="this.remove()">` : ""}</span>${esc(f.nom)}</button>`).join("")}</div>`;
+  h += `<h3>Couches affichées</h3>`;
+  h += `<div class="cl"><div class="cl-tete"><button class="oeil ${p.equipe ? "on" : ""}" data-eq aria-label="Afficher ou masquer">${p.equipe ? "👁" : "◌"}</button><div class="cl-nom">Prospections de l'équipe<small>Vos parcelles : contour de la couleur du type · Collègues : contour blanc et initiales (zoom proche)</small></div></div><div class="chips legende">${Object.values(TYPES).map(t => `<span class="chip-type" style="--c:${t.c}">${esc(t.l)}</span>`).join("")}</div></div>`;
+  if (!p.actives.length) h += `<p class="note">Aucune couche. Ajoutez-en depuis l'onglet « Ajouter des couches ».</p>`;
+  p.actives.forEach((a, i) => {
+    const c = DEF_COUCHE(a.id); if (!c) return;
+    const loin = z < c.zmin;
+    h += `<div class="cl ${a.vis ? "" : "masquee"}"><div class="cl-tete"><button class="oeil ${a.vis ? "on" : ""}" data-vis="${i}" aria-label="Afficher ou masquer ${esc(c.nom)}">${a.vis ? "👁" : "◌"}</button><div class="cl-nom">${esc(c.nom)}<small>${esc(THEMES_COUCHES[c.t])}${loin && a.vis ? ` · <span class="relance">zoomez pour la voir</span>` : ""}</small></div>
+      <button class="ic" data-haut="${i}" ${i ? "" : "disabled"} aria-label="Monter">▲</button><button class="ic" data-bas="${i}" ${i < p.actives.length - 1 ? "" : "disabled"} aria-label="Descendre">▼</button><button class="ic" data-inf="${esc(c.id)}" aria-label="Informations">ⓘ</button><button class="ic" data-sup="${i}" aria-label="Retirer">✕</button></div>
+      <div class="cl-op"><span>Opacité</span><input type="range" min="10" max="100" step="5" value="${Math.round(a.op * 100)}" data-op="${i}" aria-label="Opacité ${esc(c.nom)}"><span>${Math.round(a.op * 100)} %</span></div></div>`;
   });
-  h += `<div class="couche"><label><input type="checkbox" id="cEquipe" ${(p.equipe ? p.equipe.on : true) ? "checked" : ""}>Prospections de l'équipe</label></div>`;
-  h += `<p class="note">Le zonage d'urbanisme n'apparaît qu'à partir d'un certain niveau de zoom et seulement pour les communes dont le document est publié sur le Géoportail de l'Urbanisme.</p>`;
-  h += `<button class="btn btn2" id="cHorsLigne">Préparer cette zone pour le hors ligne</button><p class="note" id="cHlInfo">Télécharge la zone affichée pour les couches cochées, hors urbanisme.</p>`;
-  ouvrirSheet("Couches", h);
-  $("sheetCorps").querySelectorAll("[data-c]").forEach(i => i.onchange = () => sauverPref(i.dataset.c, { on: i.checked, op: COUCHES.find(c => c.id === i.dataset.c).op }));
-  $("sheetCorps").querySelectorAll("[data-o]").forEach(i => i.oninput = () => { const c = COUCHES.find(x => x.id === i.dataset.o); sauverPref(c.id, { on: c.on, op: i.value / 100 }); });
-  $("cEquipe").onchange = e => sauverPref("equipe", { on: e.target.checked });
+  h += `<button class="plus" id="cAjout">＋ Ajouter des couches</button>`;
+  h += `<h3>Hors ligne</h3><button class="btn btn2" id="cHorsLigne">Préparer cette zone pour le hors ligne</button><p class="note" id="cHlInfo">Télécharge la zone affichée pour le fond et les couches visibles, hors urbanisme.</p>`;
+  const corps = $("ongCorps"); corps.innerHTML = h;
+  const maj = f => { const q = prefs(); f(q); sauverPrefs(q); rendreMesCouches(); };
+  corps.querySelectorAll("[data-fond]").forEach(b => b.onclick = () => maj(q => { q.fond = b.dataset.fond; }));
+  corps.querySelector("[data-eq]").onclick = () => maj(q => { q.equipe = !q.equipe; });
+  corps.querySelectorAll("[data-vis]").forEach(b => b.onclick = () => maj(q => { const a = q.actives[+b.dataset.vis]; a.vis = !a.vis; }));
+  corps.querySelectorAll("[data-haut]").forEach(b => b.onclick = () => maj(q => { const i = +b.dataset.haut; q.actives.splice(i - 1, 0, q.actives.splice(i, 1)[0]); }));
+  corps.querySelectorAll("[data-bas]").forEach(b => b.onclick = () => maj(q => { const i = +b.dataset.bas; q.actives.splice(i + 1, 0, q.actives.splice(i, 1)[0]); }));
+  corps.querySelectorAll("[data-sup]").forEach(b => b.onclick = () => maj(q => { q.actives.splice(+b.dataset.sup, 1); }));
+  corps.querySelectorAll("[data-inf]").forEach(b => b.onclick = () => infoCouche(b.dataset.inf));
+  corps.querySelectorAll("[data-op]").forEach(r => r.oninput = () => {
+    const q = prefs(); q.actives[+r.dataset.op].op = r.value / 100; sauverPrefs(q);
+    r.nextElementSibling.textContent = r.value + " %";
+  });
+  $("cAjout").onclick = () => { ongletCouches = "cat"; panneauCouches(); };
   $("cHorsLigne").onclick = prechargerZone;
 }
+function rendreCatalogue() {
+  const corps = $("ongCorps");
+  corps.innerHTML = `<input id="catRech" type="search" placeholder="Rechercher une couche (ex. EBC, pente, Natura…)" value="${esc(rechCat)}" autocomplete="off"><div class="filtres" id="catThemes">${["Tous"].concat(THEMES_COUCHES).map((t, i) => `<button data-th="${i - 1}" class="${themeCat === i - 1 ? "on" : ""}">${esc(t)}</button>`).join("")}</div><div id="catListe"></div>`;
+  const liste = () => {
+    const p = prefs(), ids = new Set(p.actives.map(a => a.id));
+    const q = sansAccent(rechCat.trim().toLowerCase());
+    let h = "";
+    THEMES_COUCHES.forEach((t, ti) => {
+      if (themeCat >= 0 && themeCat !== ti) return;
+      const cs = CATALOGUE.filter(c => c.t === ti && (!q || sansAccent((c.nom + " " + (c.d || "") + " " + t).toLowerCase()).includes(q) || (q === "ebc" && c.id === "ebc")));
+      if (!cs.length) return;
+      h += `<h3>${esc(t)}</h3>` + cs.map(c => `<div class="cat"><div class="cl-nom">${esc(c.nom)}<small>${esc(c.p ? "" : c.d || "")}</small></div><button class="ic" data-inf="${c.id}" aria-label="Informations">ⓘ</button><button class="aj ${ids.has(c.id) ? "on" : ""}" data-aj="${c.id}">${ids.has(c.id) ? "✓ Affichée" : "＋ Ajouter"}</button></div>`).join("");
+    });
+    $("catListe").innerHTML = h || `<p class="note">Aucune couche ne correspond.</p>`;
+    $("catListe").querySelectorAll("[data-aj]").forEach(b => b.onclick = () => {
+      const q2 = prefs(), i = q2.actives.findIndex(a => a.id === b.dataset.aj);
+      if (i >= 0) q2.actives.splice(i, 1);
+      else { const c = DEF_COUCHE(b.dataset.aj); q2.actives.unshift({ id: c.id, op: c.op, vis: true }); toast(c.nom + " ajoutée" + (map.getZoom() < c.zmin ? " : zoomez pour la voir" : "")); }
+      sauverPrefs(q2); liste();
+      const nb = $("sheetCorps").querySelector(".onglets .nb"); if (nb) nb.textContent = q2.actives.length;
+    });
+    $("catListe").querySelectorAll("[data-inf]").forEach(b => b.onclick = () => infoCouche(b.dataset.inf));
+  };
+  $("catRech").oninput = e => { rechCat = e.target.value; liste(); };
+  $("catThemes").querySelectorAll("[data-th]").forEach(b => b.onclick = () => { themeCat = +b.dataset.th; $("catThemes").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); liste(); });
+  liste();
+}
+function infoCouche(id) {
+  const c = DEF_COUCHE(id); if (!c) return;
+  const ids = new Set(prefs().actives.map(a => a.id));
+  let h = `<p>${esc(c.d || "")}</p>`;
+  h += `<div class="ligne"><span>Thème</span><span>${esc(THEMES_COUCHES[c.t])}</span></div><div class="ligne"><span>Source</span><span>${esc(c.src)}</span></div>`;
+  h += `<div class="ligne"><span>Visible</span><span>${c.zmin > 0 ? "à partir du zoom " + c.zmin + (map.getZoom() < c.zmin ? " (actuel : " + map.getZoom() + ")" : "") : "à toutes les échelles"}</span></div>`;
+  if (c.g) h += `<p class="note">N'apparaît que pour les communes dont le document est publié sur le Géoportail de l'Urbanisme.</p>`;
+  if (c.id === "ebc" && c.secours) h += `<div class="alerte">Le filtre EBC n'est pas accepté par le serveur : toutes les prescriptions sont affichées. Les EBC sont la trame verte quadrillée.</div>`;
+  if (c.leg) h += `<h3>Légende</h3><img class="legende-img" src="${esc(c.leg)}" alt="Légende" onerror="this.replaceWith(Object.assign(document.createElement('p'),{className:'note',textContent:'Légende indisponible hors ligne.'}))">`;
+  h += `<div class="boutons"><button class="btn" id="icAj">${ids.has(c.id) ? "Retirer de la carte" : "Ajouter à la carte"}</button><button class="btn btn2" id="icRet">Retour aux couches</button></div>`;
+  ouvrirSheet(c.nom, h);
+  $("icAj").onclick = () => {
+    const q = prefs(), i = q.actives.findIndex(a => a.id === c.id);
+    if (i >= 0) q.actives.splice(i, 1); else q.actives.unshift({ id: c.id, op: c.op, vis: true });
+    sauverPrefs(q); ongletCouches = "mes"; panneauCouches();
+  };
+  $("icRet").onclick = panneauCouches;
+}
 async function prechargerZone() {
-  const couches = COUCHES.filter(c => c.on && c.l._url && /GetTile/i.test(c.l._url));
+  const p = prefs();
+  const couches = [fondActif].concat(p.actives.filter(a => a.vis).map(a => DEF_COUCHE(a.id))).filter(c => c && c.l && c.l._url && /GetTile/i.test(c.l._url));
   const b = map.getBounds(), z0 = map.getZoom(), urls = [];
   for (let z = z0; z <= Math.min(z0 + 3, 17); z++) {
     const nw = map.project(b.getNorthWest(), z).divideBy(256).floor(), se = map.project(b.getSouthEast(), z).divideBy(256).floor();
-    for (let x = nw.x; x <= se.x; x++) for (let y = nw.y; y <= se.y; y++) couches.forEach(c => urls.push(L.Util.template(c.l._url, { x, y, z, s: "" })));
+    for (let x = nw.x; x <= se.x; x++) for (let y = nw.y; y <= se.y; y++) couches.forEach(c => { if (z >= (c.zmin || 0) && z <= (c.zmax || 20)) urls.push(L.Util.template(c.l._url, { x, y, z, s: "" })); });
   }
   const info = $("cHlInfo");
   if (urls.length > 2500) { info.textContent = "Zone trop grande (" + urls.length + " images). Zoomez puis recommencez."; return; }
@@ -339,6 +535,113 @@ async function prechargerZone() {
     if ($("cHlInfo")) $("cHlInfo").textContent = fait + " / " + urls.length;
   }
   if ($("cHlInfo")) $("cHlInfo").textContent = ko ? ko + " images non téléchargées : réessayez avec plus de réseau." : "Zone prête pour le hors ligne.";
+}
+
+// ---- Recherche (parcelle, lieu, coordonnees) ------------------
+let ongletRech = "parcelle", communeRech = ls("pb6_commune", null);
+function panneauRecherche() {
+  const o = ongletRech;
+  let h = `<div class="onglets"><button data-or="parcelle" class="${o === "parcelle" ? "on" : ""}">Parcelle</button><button data-or="lieu" class="${o === "lieu" ? "on" : ""}">Lieu, adresse</button><button data-or="coord" class="${o === "coord" ? "on" : ""}">Coordonnées</button></div>`;
+  if (o === "parcelle") {
+    h += `<label for="rCom">Commune (nom, code postal ou INSEE)</label><input id="rCom" autocomplete="off" placeholder="ex. Albertville" value="${communeRech ? esc(communeRech.nom + " (" + communeRech.dep + ")") : ""}"><div id="rComListe" class="propositions"></div>
+      <div class="deux"><div><label for="rSec">Section</label><input id="rSec" autocapitalize="characters" maxlength="2" placeholder="ex. B ou AC"></div><div><label for="rNum">Numéro</label><input id="rNum" inputmode="numeric" maxlength="4" placeholder="ex. 123"></div></div>
+      <details class="avance"><summary>Commune déléguée ou associée</summary><label for="rPre">Préfixe (3 chiffres, sinon 000)</label><input id="rPre" inputmode="numeric" maxlength="3" placeholder="000"></details>
+      <button class="btn" id="rGo">Rechercher la parcelle</button><div id="rRes"></div>`;
+  } else if (o === "lieu") {
+    h += `<label for="rLieu">Lieu-dit, adresse, sommet, col…</label><input id="rLieu" type="search" autocomplete="off" placeholder="ex. Col de la Madeleine"><div id="rRes" class="propositions"></div>`;
+  } else {
+    h += `<p class="note">Degrés décimaux (WGS84, comme un GPS) : latitude puis longitude.</p><label for="rLL">Coordonnées</label><input id="rLL" inputmode="decimal" placeholder="ex. 45.6755, 6.3925"><button class="btn" id="rGo">Aller à ce point</button><div id="rRes"></div>`;
+  }
+  ouvrirSheet("Rechercher", h);
+  $("sheetCorps").querySelectorAll("[data-or]").forEach(b => b.onclick = () => { ongletRech = b.dataset.or; panneauRecherche(); });
+  if (o === "parcelle") initRechParcelle();
+  if (o === "lieu") initRechLieu();
+  if (o === "coord") {
+    const go = () => {
+      const m = /(-?\d+(?:[.,]\d+)?)\s*[,; ]\s*(-?\d+(?:[.,]\d+)?)/.exec($("rLL").value);
+      const lat = m && +m[1].replace(",", "."), lng = m && +m[2].replace(",", ".");
+      if (!m || Math.abs(lat) > 90 || Math.abs(lng) > 180) { $("rRes").innerHTML = `<p class="err">Format attendu : 45.6755, 6.3925</p>`; return; }
+      allerA(L.latLng(lat, lng));
+    };
+    $("rGo").onclick = go; $("rLL").onkeydown = e => { if (e.key === "Enter") go(); };
+    $("rLL").focus();
+  }
+}
+function allerA(ll, zoom) {
+  fermerSheet(); map.setView(ll, zoom || 17);
+  gSel.clearLayers(); L.circleMarker(ll, { radius: 10, color: "#ffe14d", weight: 3, fillOpacity: .2, interactive: false }).addTo(gSel);
+}
+let rechT;
+function initRechParcelle() {
+  const inp = $("rCom"), liste = $("rComListe");
+  inp.oninput = () => {
+    clearTimeout(rechT); communeRech = null;
+    const q = inp.value.trim(); if (q.length < 2) { liste.innerHTML = ""; return; }
+    rechT = setTimeout(async () => {
+      const f = "fields=nom,code,codeDepartement,codesPostaux&limit=12";
+      const url = /^\d{5}$/.test(q) ? [`https://geo.api.gouv.fr/communes?code=${q}&${f}`, `https://geo.api.gouv.fr/communes?codePostal=${q}&${f}`] : [`https://geo.api.gouv.fr/communes?nom=${encodeURIComponent(q)}&boost=population&${f}`];
+      let r = [];
+      try { for (const u of url) r = r.concat(await getJson(u)); } catch (e) { liste.innerHTML = `<p class="note">Recherche de commune impossible sans réseau.</p>`; return; }
+      // Savoie et Haute-Savoie en premier.
+      r.sort((a, b) => (/^7[34]$/.test(b.codeDepartement) ? 1 : 0) - (/^7[34]$/.test(a.codeDepartement) ? 1 : 0));
+      liste.innerHTML = r.slice(0, 8).map((c, i) => `<button data-i="${i}">${esc(c.nom)} <small>${esc(c.codeDepartement)} · INSEE ${esc(c.code)}</small></button>`).join("") || `<p class="note">Aucune commune trouvée.</p>`;
+      liste.querySelectorAll("[data-i]").forEach(b => b.onclick = () => {
+        const c = r[+b.dataset.i]; communeRech = { nom: c.nom, insee: c.code, dep: c.codeDepartement }; lss("pb6_commune", communeRech);
+        inp.value = c.nom + " (" + c.codeDepartement + ")"; liste.innerHTML = ""; $("rSec").focus();
+      });
+    }, 300);
+  };
+  const go = () => chercherParcelleCode();
+  $("rGo").onclick = go;
+  ["rSec", "rNum", "rPre"].forEach(i => $(i).onkeydown = e => { if (e.key === "Enter") go(); });
+  if (!communeRech) inp.focus(); else $("rSec").focus();
+}
+async function chercherParcelleCode() {
+  const res = $("rRes");
+  if (!communeRech) { res.innerHTML = `<p class="err">Choisissez d'abord la commune dans la liste.</p>`; return; }
+  const sec = $("rSec").value.trim().toUpperCase(), num = $("rNum").value.trim(), pre = $("rPre").value.trim();
+  if (!/^[0-9A-Z]{1,2}$/.test(sec)) { res.innerHTML = `<p class="err">Section : 1 ou 2 caractères (ex. B, 0B ou AC).</p>`; return; }
+  if (!/^\d{1,4}$/.test(num)) { res.innerHTML = `<p class="err">Numéro : 1 à 4 chiffres.</p>`; return; }
+  if (pre && !/^\d{1,3}$/.test(pre)) { res.innerHTML = `<p class="err">Préfixe : 3 chiffres.</p>`; return; }
+  res.innerHTML = `<p class="note">Recherche…</p>`;
+  let q = `${APICARTO}/cadastre/parcelle?source_ign=PCI&code_insee=${communeRech.insee}&section=${sec.padStart(2, "0")}&numero=${num.padStart(4, "0")}`;
+  if (pre) q += `&com_abs=${pre.padStart(3, "0")}`;
+  let r;
+  try { r = await getJson2(q); } catch (e) { res.innerHTML = `<p class="err">Cadastre injoignable : vérifiez le réseau.</p>`; return; }
+  const fs = (r.features || []).filter(f => f.geometry);
+  if (!fs.length) { res.innerHTML = `<p class="err">Parcelle ${esc(sec)} ${esc(num)} introuvable à ${esc(communeRech.nom)}. Vérifiez la section, ou indiquez le préfixe d'une commune déléguée.</p>`; return; }
+  const ouvrir = f => {
+    const b = L.geoJSON(f.geometry).getBounds();
+    const p = depuisFeature(f, b.getCenter());
+    map.fitBounds(b, { maxZoom: 18, padding: [30, 30] });
+    montrerParcelle(p);
+  };
+  if (fs.length === 1) { ouvrir(fs[0]); return; }
+  res.innerHTML = `<p class="note">${fs.length} parcelles portent ce numéro (communes déléguées) :</p>` + fs.map((f, i) => `<button class="dossier" data-i="${i}">${esc(f.properties.nom_com || communeRech.nom)} · préfixe ${esc(f.properties.com_abs || "000")} · ${esc(f.properties.section)} ${esc(f.properties.numero)}<small>${f.properties.contenance ? ha(f.properties.contenance) : ""}</small></button>`).join("");
+  res.querySelectorAll("[data-i]").forEach(b => b.onclick = () => ouvrir(fs[+b.dataset.i]));
+}
+function initRechLieu() {
+  const inp = $("rLieu"), res = $("rRes");
+  inp.focus();
+  inp.oninput = () => {
+    clearTimeout(rechT);
+    const q = inp.value.trim(); if (q.length < 3) { res.innerHTML = ""; return; }
+    rechT = setTimeout(async () => {
+      let r = [];
+      try {
+        const c = map.getCenter();
+        const j = await getJson(`${GEOPF}/geocodage/completion/?text=${encodeURIComponent(q)}&type=PositionOfInterest,StreetAddress&maximumResponses=10&lonlat=${c.lng.toFixed(4)},${c.lat.toFixed(4)}`);
+        r = (j.results || []).map(x => ({ nom: x.fulltext, type: x.kind || (x.poiType || [])[0] || "", ll: L.latLng(x.y, x.x) }));
+      } catch (e) {
+        try {
+          const j = await getJson(`${GEOPF}/geocodage/search?q=${encodeURIComponent(q)}&limit=10`);
+          r = (j.features || []).map(f => ({ nom: f.properties.label || f.properties.name, type: f.properties.type || "", ll: L.latLng(f.geometry.coordinates[1], f.geometry.coordinates[0]) }));
+        } catch (e2) { res.innerHTML = `<p class="note">Recherche impossible sans réseau.</p>`; return; }
+      }
+      res.innerHTML = r.map((x, i) => `<button data-i="${i}">${esc(x.nom)}${x.type ? ` <small>${esc(x.type)}</small>` : ""}</button>`).join("") || `<p class="note">Aucun résultat.</p>`;
+      res.querySelectorAll("[data-i]").forEach(b => b.onclick = () => allerA(r[+b.dataset.i].ll, 16));
+    }, 350);
+  };
 }
 
 // ---- GPS ------------------------------------------------------
@@ -634,11 +937,16 @@ async function infosParcelle(ll) {
   bandeau(null);
   if (outil !== "info") return;
   if (!p) { toast("Aucune parcelle à cet endroit", 1); return; }
+  montrerParcelle(p);
+}
+// Fiche d'une parcelle touchee sur la carte ou trouvee par la recherche.
+async function montrerParcelle(p) {
   parcelleInfo = p; surligner(p);
   const rendre = () => {
     if (parcelleInfo !== p) return;
-    const d = cherchePar(p.idu);
-    ouvrirSheet(`${p.commune} · ${p.section} ${p.numero}`, htmlCadastre(p) + (d ? `<div class="alerte">Déjà dans le dossier ${esc(d.nom)}, par ${esc(d.auteur)}.</div>` : "") + `<h3>Zonage réglementaire</h3>` + htmlZonage(p));
+    const d = cherchePar(p.idu), saisir = !document.body.classList.contains("locked") && !dossierCourant && !d;
+    ouvrirSheet(`${p.commune} · ${p.section} ${p.numero}`, htmlCadastre(p) + (d ? `<div class="alerte">Déjà dans le dossier ${esc(d.nom)}, par ${esc(d.auteur)}.</div>` : "") + (saisir ? `<button class="btn" id="pSaisir">📝 Saisir cette parcelle</button>` : "") + `<h3>Zonage réglementaire</h3>` + htmlZonage(p));
+    if (saisir) $("pSaisir").onclick = () => choisirOutil("saisie");
   };
   rendre();
   await chargerZonage(p); rendre();
@@ -1408,13 +1716,19 @@ async function resoudreEnAttente() {
 // ---- Prospections sur la carte --------------------------------
 function dessinerProspections() {
   if (!gProspections) return;
-  gProspections.clearLayers();
+  gProspections.clearLayers(); gInitiales.clearLayers(); gInitiales.addTo(gProspections);
   dossiers.forEach(d => {
     const initiales = String(d.auteur || "").split(/\s+/).map(x => x[0] || "").join("").toUpperCase();
+    // Parcelles des collegues : contour blanc et initiales, pour eviter de prospecter deux fois.
+    const collegue = user && (d.auteurId ? d.auteurId !== user.id : d.auteur !== user.nom);
     d.parcelles.forEach(p => {
       const t = TYPES[typeDe(p)], e = etatSuivi(p, d);
-      const style = { color: t.c, weight: e.relance ? 3 : 2, dashArray: e.fini ? "4 4" : null, fillColor: t.c, fillOpacity: .32 };
+      const style = { color: collegue ? "#ffffff" : t.c, weight: e.relance ? 3.5 : collegue ? 2.5 : 2, dashArray: e.fini ? "4 4" : null, fillColor: t.c, fillOpacity: collegue ? .45 : .32 };
       const c = p.geom ? L.geoJSON(p.geom, { style }) : L.circleMarker([p.lat, p.lng], Object.assign({ radius: 8 }, style));
+      if (collegue && initiales) {
+        const centre = p.geom ? c.getBounds().getCenter() : L.latLng(p.lat, p.lng);
+        L.marker(centre, { interactive: false, keyboard: false, icon: L.divIcon({ className: "initiales", html: "<span>" + esc(initiales) + "</span>", iconSize: [0, 0] }) }).addTo(gInitiales);
+      }
       c.on("click", ev => {
         L.DomEvent.stopPropagation(ev);
         if (peutEditer() && outil !== "info") { clicCarte(ev.latlng); return; }
@@ -1439,6 +1753,7 @@ $("sheetFermer").onclick = () => {
   if (dossierCourant) { dossierCourant = null; vueDossier = "fiche"; gSel.clearLayers(); enAjout = false; if (outil === "saisie") choisirOutil("info"); }
 };
 $("btnCouches").onclick = panneauCouches;
+$("btnRecherche").onclick = panneauRecherche;
 // ---- Dossiers prospection ------------------------------------
 let filtreDossiers = "tous", rechercheDossiers = "";
 const sansAccent = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
