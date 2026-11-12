@@ -944,7 +944,7 @@ async function chargerZonage(p) {
   const gpus = GPU_SURF.map(async ([res, lib, tn, nomf]) => {
     let feats;
     try { feats = (await getJson2(`${APICARTO}/gpu/${res}?geom=${g}`)).features || []; }
-    catch (e) { try { feats = await wfsZone(tn, "geometrie", p); } catch (e2) { manquants.push(lib); return; } }
+    catch (e) { try { feats = await wfsZone(tn, "the_geom", p); } catch (e2) { manquants.push(lib); return; } }
     if (res === "zone-urba" && feats.length) aPlu = true;
     feats.forEach(f => {
       const x = f.properties || {};
