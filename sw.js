@@ -1,5 +1,5 @@
 // Application disponible hors ligne, et fonds de carte deja vus conserves.
-const VERSION='pb7-4', APP='app-'+VERSION, TUILES='tuiles-v1', MAX_TUILES=6000;
+const VERSION='pb7-5', APP='app-'+VERSION, TUILES='tuiles-v1', MAX_TUILES=6000;
 const FICHIERS=['./','./index.html','./style.css','./config.js','./app.js','./modele_courrier.docx','./modele_passage.docx','./modele_passage_bois.docx','./manifest.webmanifest','./vendor/leaflet.js','./vendor/leaflet.css','./vendor/jszip.min.js','./vendor/images/marker-icon.png','./vendor/images/marker-icon-2x.png','./vendor/images/marker-shadow.png','./vendor/images/layers.png','./vendor/images/layers-2x.png','./icons/icon-192.png','./icons/icon-512.png'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(APP).then(c=>c.addAll(FICHIERS)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k.startsWith('app-')&&k!==APP).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
