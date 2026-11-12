@@ -908,31 +908,49 @@ function liensFiche(res, x) {
 }
 // Un service qui ne repond pas est retente une fois avant d'etre signale.
 async function getJson2(url) { try { return await getJson(url); } catch (e) { await new Promise(r => setTimeout(r, 800)); return getJson(url); } }
+// Couches de zonage. Chaque source a son repli direct sur le WFS de la Geoplateforme
+// (memes noms de couches et de champs que le service API Carto de l'IGN), utilise
+// quand API Carto est en panne. tn = couche WFS, gf = champ geometrie.
+const GPU_SURF = [
+  ["zone-urba", "Zonage PLU", "wfs_du:zone_urba", x => [x.libelle, x.libelong].filter(Boolean).join(" : ")],
+  ["secteur-cc", "Carte communale", "wfs_du:secteur_cc", x => x.libelle || ""],
+  ["prescription-surf", "Prescription", "wfs_du:prescription_surf", x => x.libelle || x.txt || ""],
+  ["info-surf", "Information d'urbanisme", "wfs_du:info_surf", x => x.libelle || x.txt || ""],
+  ["assiette-sup-s", "Servitude d'utilité publique", "wfs_sup:assiette_sup_s", x => [x.suptype, x.nomsuplitt].filter(Boolean).join(" : ")]
+];
+const NAT_TN = {
+  "natura-habitat": "patrinat_sic:sic", "natura-oiseaux": "patrinat_zps:zps",
+  znieff1: "patrinat_znieff1:znieff1", znieff2: "patrinat_znieff2:znieff2",
+  pn: "patrinat_pn2:pn", pnr: "patrinat_pnr:pnr", rnn: "patrinat_rnn:rnn",
+  rnc: "patrinat_rnc:pnm", rncf: "patrinat_rncfs:rncfs"
+};
+const nomNature = x => x.sitename || x.nom || x.nom_site || "";
+// Requete WFS de secours : les features intersectant le centre de la parcelle.
+async function wfsZone(tn, champGeom, p) {
+  const pt = `POINT(${p.lat.toFixed(6)} ${p.lng.toFixed(6)})`; // lat lon : le serveur attend cet ordre en CRS:84
+  const f = `INTERSECTS(${champGeom},${pt})`;
+  const r = await getJson(`${GEOPF}/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=${tn}&OUTPUTFORMAT=application/json&SRSNAME=CRS:84&COUNT=50&CQL_FILTER=${encodeURIComponent(f)}`, 20000);
+  return r.features || [];
+}
 async function chargerZonage(p) {
   const g = geomParam(geomRequete(p)), manquants = [], zones = [];
   let aPlu = false;
   const nature = SOURCES_NATURE.map(async ([res, lib]) => {
-    try {
-      const r = await getJson2(`${APICARTO}/nature/${res}?geom=${g}`);
-      (r.features || []).forEach(f => { const x = f.properties || {}; zones.push(Object.assign({ type: lib, nom: x.sitename || x.nom || x.nom_site || "", reglementaire: true }, liensFiche(res, x))); });
-    } catch (e) { manquants.push(lib); }
+    let feats;
+    try { feats = (await getJson2(`${APICARTO}/nature/${res}?geom=${g}`)).features || []; }
+    catch (e) { try { feats = await wfsZone(NAT_TN[res], "geom", p); } catch (e2) { manquants.push(lib); return; } }
+    feats.forEach(f => { const x = f.properties || {}; zones.push(Object.assign({ type: lib, nom: nomNature(x), reglementaire: true }, liensFiche(res, x))); });
   });
-  const gpus = [
-    ["zone-urba", "Zonage PLU", x => [x.libelle, x.libelong].filter(Boolean).join(" : "), false],
-    ["secteur-cc", "Carte communale", x => x.libelle || "", false],
-    ["prescription-surf", "Prescription", x => x.libelle || x.txt || "", false],
-    ["info-surf", "Information d'urbanisme", x => x.libelle || x.txt || "", false],
-    ["assiette-sup-s", "Servitude d'utilité publique", x => [x.suptype, x.nomsuplitt].filter(Boolean).join(" : "), false]
-  ].map(async ([res, lib, nomf]) => {
-    try {
-      const r = await getJson2(`${APICARTO}/gpu/${res}?geom=${g}`);
-      if (res === "zone-urba" && (r.features || []).length) aPlu = true;
-      (r.features || []).forEach(f => {
-        const x = f.properties || {};
-        const ebc = res === "prescription-surf" && (String(x.typepsc) === "01" || /espaces?\s+bois/i.test(String(x.libelle || "") + String(x.txt || "")));
-        zones.push({ type: ebc ? "Espace boisé classé (EBC)" : lib, nom: nomf(x), reglementaire: ebc || res === "assiette-sup-s" });
-      });
-    } catch (e) { manquants.push(lib); }
+  const gpus = GPU_SURF.map(async ([res, lib, tn, nomf]) => {
+    let feats;
+    try { feats = (await getJson2(`${APICARTO}/gpu/${res}?geom=${g}`)).features || []; }
+    catch (e) { try { feats = await wfsZone(tn, "geometrie", p); } catch (e2) { manquants.push(lib); return; } }
+    if (res === "zone-urba" && feats.length) aPlu = true;
+    feats.forEach(f => {
+      const x = f.properties || {};
+      const ebc = res === "prescription-surf" && (String(x.typepsc) === "01" || /espaces?\s+bois/i.test(String(x.libelle || "") + String(x.txt || "")));
+      zones.push({ type: ebc ? "Espace boisé classé (EBC)" : lib, nom: nomf(x), reglementaire: ebc || res === "assiette-sup-s" });
+    });
   });
   await Promise.all(nature.concat(gpus));
   // Une commune couverte par un PLU n'a pas de carte communale : ce service n'est alors pas utile.
