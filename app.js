@@ -925,12 +925,22 @@ const NAT_TN = {
   rnc: "patrinat_rnc:pnm", rncf: "patrinat_rncfs:rncfs"
 };
 const nomNature = x => x.sitename || x.nom || x.nom_site || "";
-// Requete WFS de secours : les features intersectant le centre de la parcelle.
+// Le serveur renvoie les coordonnees en lat,lon : on les remet dans l'ordre GeoJSON (lon,lat).
+const remettreCoords = c => typeof c[0] === "number" ? (c[0] > c[1] ? [c[1], c[0]] : c) : c.map(remettreCoords);
+const anneaux = g => g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
+// Repli WFS par filtre geometrique (zones protegees) : features intersectant le centre de la parcelle.
 async function wfsZone(tn, champGeom, p) {
   const pt = `POINT(${p.lat.toFixed(6)} ${p.lng.toFixed(6)})`; // lat lon : le serveur attend cet ordre en CRS:84
   const f = `INTERSECTS(${champGeom},${pt})`;
   const r = await getJson(`${GEOPF}/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=${tn}&OUTPUTFORMAT=application/json&SRSNAME=CRS:84&COUNT=50&CQL_FILTER=${encodeURIComponent(f)}`, 20000);
   return r.features || [];
+}
+// Repli WFS par emprise (urbanisme) : on recupere les zones autour de la parcelle puis on garde
+// celles qui contiennent son centre. N'a pas besoin du nom du champ geometrie.
+async function wfsZoneBbox(tn, p) {
+  const e = .0003, b = [p.lat - e, p.lng - e, p.lat + e, p.lng + e].map(v => v.toFixed(6)).join(",");
+  const r = await getJson(`${GEOPF}/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=${tn}&OUTPUTFORMAT=application/json&SRSNAME=CRS:84&COUNT=50&BBOX=${b},urn:ogc:def:crs:EPSG::4326`, 20000);
+  return (r.features || []).filter(f => f.geometry && anneaux({ type: f.geometry.type, coordinates: remettreCoords(f.geometry.coordinates) }).some(pl => dansPolygone(p.lng, p.lat, pl[0])));
 }
 async function chargerZonage(p) {
   const g = geomParam(geomRequete(p)), manquants = [], zones = [];
@@ -944,7 +954,7 @@ async function chargerZonage(p) {
   const gpus = GPU_SURF.map(async ([res, lib, tn, nomf]) => {
     let feats;
     try { feats = (await getJson2(`${APICARTO}/gpu/${res}?geom=${g}`)).features || []; }
-    catch (e) { try { feats = await wfsZone(tn, "the_geom", p); } catch (e2) { manquants.push(lib); return; } }
+    catch (e) { try { feats = await wfsZoneBbox(tn, p); } catch (e2) { manquants.push(lib); return; } }
     if (res === "zone-urba" && feats.length) aPlu = true;
     feats.forEach(f => {
       const x = f.properties || {};
