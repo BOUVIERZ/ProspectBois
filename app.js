@@ -1437,6 +1437,7 @@ function afficherFiche(d) {
   h += `<div class="chips">${Object.keys(n).map(k => chipType(k) + `<b class="nb">${n[k]}</b>`).join("")}</div>`;
   h += ligne("N° de prospection", d.code) + ligne("Commune", [...new Set(d.parcelles.map(p => p.commune).filter(Boolean))].join(", ")) + ligne("Lieu-dit", d.donnees.lieu_dit) +
     ligne("Gestionnaire", d.auteur) + ligne("Créé le", d.cree) + ligne("Parcelles", d.parcelles.length + " · " + ha(surf)) + ligne("Propriétaires", proprietairesDe(d).join(", ") || "—");
+  if (d.parcelles.some(p => p.geom)) h += `<button class="btn" id="fCarte" type="button">🗺️ Carte de présentation (PDF)</button>`;
   h += `<div class="boutons"><button class="btn btn2" id="fWord" type="button">📄 Fiche récap (Word)</button><button class="btn btn2" id="fMail" type="button">✉️ Recevoir la fiche</button></div>`;
   if (arch) h += `<button class="btn btn2" id="fRestaurer" type="button">↩️ Remettre dans l'appli</button>`;
   else h += peutEditer() ? `<button class="btn btn2" id="fModif" type="button">✏️ Modifier la saisie</button>` : `<p class="note">Déverrouillez le cadenas pour modifier la saisie. Le suivi se renseigne à tout moment.</p>`;
@@ -1512,6 +1513,7 @@ function brancherFiche(d) {
   const c = $("sheetCorps"), parc = idu => d.parcelles.find(x => x.idu === idu);
   $("fWord").onclick = async () => telecharger(await ficheDossier(d));
   $("fMail").onclick = async () => envoyerParMail(await ficheDossier(d), `Fiche récapitulative ${d.nom}`);
+  if ($("fCarte")) $("fCarte").onclick = () => cartePresentation(d);
   if ($("fRestaurer")) $("fRestaurer").onclick = () => restaurer(d);
   if ($("fArchiver")) $("fArchiver").onclick = () => choisirArchivage(d);
   if ($("fModif")) $("fModif").onclick = () => { vueDossier = "saisie"; outil = "saisie"; document.querySelectorAll("[data-outil]").forEach(x => x.classList.toggle("on", x.dataset.outil === "saisie")); bandeau(null); afficherDossier(); };
@@ -1872,6 +1874,65 @@ async function resoudreEnAttente() {
     }
   }
 }
+
+// ---- Carte de presentation (PDF a imprimer pour la mairie) ----
+let cpMap = null, cpFond = "plan", cpTable = true;
+function cartePresentation(d) {
+  const parcelles = d.parcelles.filter(p => p.geom);
+  if (!parcelles.length) { toast("Aucune parcelle avec contour à cartographier", 1); return; }
+  const communes = [...new Set(d.parcelles.map(p => p.commune).filter(Boolean))];
+  const surf = d.parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
+  // Peuplements et types presents, pour la legende.
+  const presents = []; Object.keys(PEUPL).forEach(n => { if (parcelles.some(p => typeDe(p) !== "PASSAGE" && natureDe(d, p) === n)) presents.push({ nom: n, c: PEUPL[n].c }); });
+  if (parcelles.some(p => typeDe(p) !== "PASSAGE" && !PEUPL[natureDe(d, p)])) presents.push({ nom: "Bois, peuplement non précisé", c: PEUPL_DEFAUT.c });
+  if (parcelles.some(p => typeDe(p) === "PASSAGE")) presents.push({ nom: "Droit de passage", c: TYPES.PASSAGE.c });
+  const petit = parcelles.length <= 30; // sur peu de parcelles, on detaille l'etiquette
+  const o = document.createElement("div"); o.id = "carteP"; o.className = "fond-" + cpFond;
+  o.innerHTML = `
+    <div class="cp-barre">
+      <button class="btn" id="cpPrint" type="button">🖨️ Imprimer / Enregistrer en PDF</button>
+      <button class="btn btn2" id="cpFond" type="button">${cpFond === "plan" ? "Fond photo" : "Fond plan"}</button>
+      <label class="cp-case"><input type="checkbox" id="cpTab" ${cpTable ? "checked" : ""}> Tableau des parcelles</label>
+      <button class="btn btn2" id="cpClose" type="button">Fermer</button>
+    </div>
+    <div class="cp-feuille" id="cpFeuille">
+      <div class="cp-titre"><h1>Prospection forestière</h1><div class="cp-sous">${esc(communes.join(", ") || "Commune")}${d.donnees.lieu_dit ? " · " + esc(d.donnees.lieu_dit) : ""}</div><div class="cp-meta">N° ${esc(d.code)} · ${esc(d.auteur || "")} · ${esc(frDate(d.cree) || "")}</div></div>
+      <div class="cp-corps"><div id="cpMap"></div>
+        <div class="cp-nord" aria-hidden="true"><svg viewBox="0 0 24 44" width="26" height="46"><polygon points="12,2 19,22 12,16 5,22" fill="#17240f"/><polygon points="12,2 12,16 5,22" fill="#4a6a3a"/><text x="12" y="38" text-anchor="middle" font-family="Arial" font-size="13" font-weight="700" fill="#17240f">N</text></svg></div>
+        <div class="cp-legende"><h2>Légende</h2>${presents.map(x => `<div class="cp-l"><span class="cp-sw" style="background:${x.c}"></span>${esc(x.nom)}</div>`).join("")}<div class="cp-tot"><div><b>${d.parcelles.length}</b> parcelles</div><div><b>${esc(ha(surf))}</b> au total</div></div></div>
+      </div>
+    </div>
+    ${cpTable ? tableauParcelles(d) : ""}`;
+  document.body.appendChild(o);
+  $("cpClose").onclick = fermerCartePresentation;
+  $("cpPrint").onclick = () => { if (cpMap) cpMap.invalidateSize(); setTimeout(() => window.print(), 300); };
+  $("cpFond").onclick = () => { cpFond = cpFond === "plan" ? "photo" : "plan"; fermerCartePresentation(); cartePresentation(d); };
+  $("cpTab").onchange = e => { cpTable = e.target.checked; fermerCartePresentation(); cartePresentation(d); };
+  // Carte
+  const f = cpFond === "photo" ? ["ORTHOIMAGERY.ORTHOPHOTOS", "normal", "image/jpeg", "PM_0_19"] : ["GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2", "normal", "image/png", "PM_0_19"];
+  cpMap = L.map("cpMap", { zoomControl: false, attributionControl: true, preferCanvas: true });
+  cpMap.attributionControl.setPrefix("");
+  wmts(f[0], f[1], f[2], f[3], { maxNativeZoom: 19 }).addTo(cpMap);
+  const grp = L.featureGroup();
+  parcelles.forEach(p => {
+    const col = couleurParcelle(d, p);
+    const lay = L.geoJSON(p.geom, { style: { color: col.o, weight: 1.3, fillColor: col.c, fillOpacity: .55 } }).addTo(grp);
+    const n = natureDe(d, p);
+    const lab = `${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}` + (petit ? `<br>${esc(ha(p.contenance || 0))}${n ? "<br>" + esc(n) : ""}` : "");
+    lay.bindTooltip(lab, { permanent: true, direction: "center", className: "cp-lbl", opacity: 1 });
+  });
+  grp.addTo(cpMap);
+  L.control.scale({ metric: true, imperial: false, position: "bottomleft", maxWidth: 180 }).addTo(cpMap);
+  try { cpMap.fitBounds(grp.getBounds().pad(.08)); } catch (e) { cpMap.setView([p0(d).lat, p0(d).lng], 15); }
+  setTimeout(() => cpMap && cpMap.invalidateSize(), 200);
+}
+function p0(d) { const p = d.parcelles[0]; return p.geom ? L.geoJSON(p.geom).getBounds().getCenter() : L.latLng(p.lat, p.lng); }
+function tableauParcelles(d) {
+  const rows = d.parcelles.map((p, i) => `<tr><td>${i + 1}</td><td>${esc(p.commune || "")} ${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</td><td>${esc(ha(p.contenance || 0))}</td><td>${esc(typeDe(p) === "PASSAGE" ? "Droit de passage" : natureDe(d, p) || "Non précisé")}</td></tr>`).join("");
+  const surf = d.parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
+  return `<div class="cp-tableau"><h2>Parcelles prospectées — ${esc([...new Set(d.parcelles.map(p => p.commune).filter(Boolean))].join(", "))}</h2><table><thead><tr><th>N°</th><th>Parcelle</th><th>Surface</th><th>Peuplement</th></tr></thead><tbody>${rows}<tr class="cp-total"><td></td><td><b>Total</b></td><td><b>${esc(ha(surf))}</b></td><td><b>${d.parcelles.length} parcelles</b></td></tr></tbody></table></div>`;
+}
+function fermerCartePresentation() { if (cpMap) { cpMap.remove(); cpMap = null; } const o = $("carteP"); if (o) o.remove(); }
 
 // ---- Prospections sur la carte --------------------------------
 function dessinerProspections() {
