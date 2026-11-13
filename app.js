@@ -32,12 +32,41 @@ const REGLES = [
   { k: "periode", l: "Période d'exploitation", q: "Quand ?" },
   { k: "degel", l: "Barrière de dégel", q: "Quand ?" }
 ];
-// Types de parcelles : couleur reprise dans l'appli, le Sheet et QGIS.
+// Types de parcelles : le type decide du dossier Drive et du contour ; droit de passage reste bleu.
 const TYPES = {
   BOIS: { l: "Bois", c: "#27ae60", dossier: "Bois" },
   PASSAGE: { l: "Droit de passage", c: "#2980b9", dossier: "Droit de passage" },
   MIXTE: { l: "Passage + bois", c: "#e67e22", dossier: "Droit de passage + bois" }
 };
+// Peuplement : couleur et logo des parcelles avec bois. Le logo est colore dans la teinte du type.
+const PEUPL_CLES = ["nature", "essence", "traitement", "diametre", "sanitaire", "qualite", "couvert"];
+const SVG_SAPIN = '<path d="M8 1.4 L11 6 H9.3 L12 10.2 H4 L6.7 6 H5 Z" fill="C"/><rect x="7.3" y="10" width="1.4" height="3.3" fill="#6b4a2b"/>';
+const SVG_FEUILLU = '<circle cx="8" cy="5.8" r="4.6" fill="C"/><rect x="7.3" y="9.4" width="1.4" height="4" fill="#6b4a2b"/>';
+const SVG_MIXTE = '<path d="M5 2 L7 5.4 H5.8 L7.7 8.6 H2.3 L4.2 5.4 H3 Z" fill="#1b7a46"/><rect x="4.4" y="8.5" width="1.2" height="2.7" fill="#6b4a2b"/><circle cx="11.2" cy="6" r="3.1" fill="#c08a1c"/><rect x="10.6" y="8.3" width="1.2" height="3" fill="#6b4a2b"/>';
+const PEUPL = {
+  "Résineux": { c: "#1b7a46", o: "#0f4f2d", svg: SVG_SAPIN },
+  "Feuillus": { c: "#c08a1c", o: "#8a6212", svg: SVG_FEUILLU },
+  "Mixte": { c: "#6f9a3a", o: "#4e7026", svg: SVG_MIXTE }
+};
+const PEUPL_DEFAUT = { c: "#8a9a9a", o: "#5f6b6b" };
+// Objet ou lire le peuplement d'une parcelle : son propre peuplement s'il a ete modifie, sinon la base du dossier.
+const peuplObj = (d, p) => (p && p.peuplement) || d.donnees;
+const natureDe = (d, p) => ([].concat(peuplObj(d, p).nature || [])[0]) || "";
+const natureBase = d => ([].concat(d.donnees.nature || [])[0]) || "";
+// Couleur de fond d'une parcelle : bleu pour le droit de passage pur, sinon la teinte du peuplement.
+function couleurParcelle(d, p) {
+  if (typeDe(p) === "PASSAGE") return { c: TYPES.PASSAGE.c, o: "#1c5a85" };
+  const n = PEUPL[natureDe(d, p)]; return n ? { c: n.c, o: n.o } : { c: PEUPL_DEFAUT.c, o: PEUPL_DEFAUT.o };
+}
+// Logo affiche seulement sur la 1re parcelle et sur celles dont le peuplement differe de la base.
+function aLogoPeupl(d, p, i) {
+  if (typeDe(p) === "PASSAGE" || !PEUPL[natureDe(d, p)]) return false;
+  return i === 0 || natureDe(d, p) !== natureBase(d);
+}
+function svgPeupl(nature) {
+  const pe = PEUPL[nature]; if (!pe) return "";
+  return `<svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true">${pe.svg.replace(/C/g, pe.c)}</svg>`;
+}
 // Etapes du suivi ; pos : seulement apres une reponse positive.
 const ETAPES = [
   { k: "courrier", l: "Courrier envoyé au propriétaire" },
@@ -1108,10 +1137,13 @@ function modeAjout() {
 function finirAjout() { enAjout = false; bandeau(null); afficherDossier(); }
 function dessinerParcellesCourantes() {
   gSel.clearLayers();
-  (dossierCourant ? dossierCourant.parcelles : []).forEach(p => {
-    const c = TYPES[typeDe(p)].c;
-    if (p.geom) L.geoJSON(p.geom, { style: { color: "#ffe14d", weight: 4, fillColor: c, fillOpacity: .35 }, interactive: false }).addTo(gSel);
-    else L.circleMarker([p.lat, p.lng], { radius: 9, color: "#ffe14d", weight: 3, fillColor: c, fillOpacity: .6, interactive: false }).addTo(gSel);
+  const d = dossierCourant;
+  (d ? d.parcelles : []).forEach((p, i) => {
+    const col = couleurParcelle(d, p);
+    const centre = p.geom ? L.geoJSON(p.geom).getBounds().getCenter() : L.latLng(p.lat, p.lng);
+    if (p.geom) L.geoJSON(p.geom, { style: { color: "#ffe14d", weight: 4, fillColor: col.c, fillOpacity: .35 }, interactive: false }).addTo(gSel);
+    else L.circleMarker([p.lat, p.lng], { radius: 9, color: "#ffe14d", weight: 3, fillColor: col.c, fillOpacity: .6, interactive: false }).addTo(gSel);
+    if (aLogoPeupl(d, p, i)) L.marker(centre, { interactive: false, keyboard: false, icon: L.divIcon({ className: "peupl-logo", html: svgPeupl(natureDe(d, p)), iconSize: [0, 0] }) }).addTo(gSel);
   });
 }
 async function ajouterParcelle(p) {
@@ -1242,9 +1274,10 @@ async function restaurer(d) {
 // ---- Affichage d'un dossier -----------------------------------
 let vueDossier = "fiche";
 function peutEditer() { return !document.body.classList.contains("locked"); }
-function htmlChamp(c, d) {
-  const v = d.donnees[c.k] || [], autre = d.donnees[c.k + "_autre"] || "";
-  return `<div class="groupe"><label>${esc(c.l)}</label><div class="choix" data-champ="${c.k}" ${c.multi ? 'data-multi="1"' : ""}>${c.o.map(o => `<button type="button" class="${v.includes(o) ? "on" : ""}" data-v="${esc(o)}">${esc(o)}</button>`).join("")}</div>${c.autre ? `<input class="autre" data-autre="${c.k}" placeholder="Autre" aria-label="${esc(c.l)} : autre" value="${esc(autre)}">` : ""}</div>`;
+// src = objet source (base d.donnees ou peuplement d'une parcelle) ; pidu = parcelle ciblee pour la saisie par parcelle.
+function htmlChamp(c, src, pidu) {
+  const v = [].concat(src[c.k] || []), autre = src[c.k + "_autre"] || "", pp = pidu ? ` data-parcelle="${esc(pidu)}"` : "";
+  return `<div class="groupe"><label>${esc(c.l)}</label><div class="choix" data-champ="${c.k}"${pp} ${c.multi ? 'data-multi="1"' : ""}>${c.o.map(o => `<button type="button" class="${v.includes(o) ? "on" : ""}" data-v="${esc(o)}">${esc(o)}</button>`).join("")}</div>${c.autre ? `<input class="autre" data-autre="${c.k}"${pp} placeholder="Autre" aria-label="${esc(c.l)} : autre" value="${esc(autre)}">` : ""}</div>`;
 }
 function texteProprio(p) {
   if (p.etat !== "ok") return "au retour du réseau";
@@ -1254,8 +1287,35 @@ function texteProprio(p) {
 const titreParcelle = p => p.etat === "ok" ? `${p.commune} · ${sansZero(p.section)} ${sansZero(p.numero)}` : `Point à identifier (${p.lat}, ${p.lng})`;
 const chipType = k => `<span class="chip-type" style="--c:${TYPES[k].c}">${esc(TYPES[k].l)}</span>`;
 function htmlParcelleSaisie(p, d) {
-  const k = typeDe(p);
-  return `<div class="parcelle" style="border-left:4px solid ${TYPES[k].c}"><div class="t"><b>${esc(titreParcelle(p))}</b><small>${p.contenance ? ha(p.contenance) : ""} · Propriétaire : ${esc(texteProprio(p))}</small><div class="types petit">${Object.keys(TYPES).map(t => `<button type="button" data-ptype="${esc(p.idu)}" data-v="${t}" class="${t === k ? "on" : ""}" style="--c:${TYPES[t].c}">${esc(TYPES[t].l)}</button>`).join("")}</div></div><button data-sup="${esc(p.idu)}" aria-label="Retirer la parcelle">🗑</button></div>`;
+  const k = typeDe(p), i = d.parcelles.indexOf(p), col = couleurParcelle(d, p);
+  let peu = "";
+  if (k !== "PASSAGE") {
+    const n = natureDe(d, p), modif = !!p.peuplement, dif = modif && n !== natureBase(d);
+    peu = `<div class="peupl-ligne">${n ? `<span class="peupl-pastille" style="--c:${col.c}">${svgPeupl(n) || ""}${esc(n)}</span>` : `<span class="peupl-pastille vide">peuplement non précisé</span>`}${dif ? `<span class="badge">différent de la base</span>` : modif ? `<span class="badge gris">modifié</span>` : i === 0 ? `<span class="badge gris">base</span>` : ""}<button type="button" class="lien" data-peupl="${esc(p.idu)}">${modif ? "Modifier" : "Peuplement différent ?"}</button></div>`;
+  }
+  return `<div class="parcelle" style="border-left:4px solid ${col.c}"><div class="t"><b>${esc(titreParcelle(p))}</b><small>${p.contenance ? ha(p.contenance) : ""} · Propriétaire : ${esc(texteProprio(p))}</small><div class="types petit">${Object.keys(TYPES).map(t => `<button type="button" data-ptype="${esc(p.idu)}" data-v="${t}" class="${t === k ? "on" : ""}" style="--c:${TYPES[t].c}">${esc(TYPES[t].l)}</button>`).join("")}</div>${peu}</div><button data-sup="${esc(p.idu)}" aria-label="Retirer la parcelle">🗑</button></div>`;
+}
+// Editeur du peuplement d'une seule parcelle : les autres donnees du dossier restent communes.
+function editerPeuplement(idu) {
+  const d = dossierCourant, p = d.parcelles.find(x => x.idu === idu); if (!p) return;
+  if (!p.peuplement) { p.peuplement = {}; PEUPL_CLES.forEach(k => { if (d.donnees[k] != null) p.peuplement[k] = Array.isArray(d.donnees[k]) ? d.donnees[k].slice() : d.donnees[k]; if (d.donnees[k + "_autre"]) p.peuplement[k + "_autre"] = d.donnees[k + "_autre"]; }); }
+  let h = `<p class="note">Parcelle ${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}. Modifiez ici le peuplement ; le reste du dossier (topographie, exploitation, réglementation) reste commun à toutes les parcelles.</p>`;
+  h += THEMES[0].champs.map(c => htmlChamp(c, p.peuplement, p.idu)).join("");
+  h += `<div class="boutons"><button class="btn" id="ppOk">Valider</button><button class="btn btn2" id="ppBase">Revenir au peuplement de base</button></div>`;
+  ouvrirSheet("Peuplement · " + sansZero(p.section) + " " + sansZero(p.numero), h);
+  const c = $("sheetCorps");
+  const maj = () => { d.brouillon = true; dbPut("dossiers", d); dessinerParcellesCourantes(); };
+  c.addEventListener("click", e => {
+    const b = e.target.closest(".choix button"); if (!b) return;
+    const g = b.parentElement, k = g.dataset.champ;
+    if (!g.dataset.multi) g.querySelectorAll("button").forEach(x => { if (x !== b) x.classList.remove("on"); });
+    b.classList.toggle("on");
+    p.peuplement[k] = [...g.querySelectorAll("button.on")].map(x => x.dataset.v);
+    maj();
+  });
+  c.addEventListener("input", e => { const t = e.target; if (t.dataset.autre) { p.peuplement[t.dataset.autre + "_autre"] = t.value; maj(); } });
+  $("ppOk").onclick = () => { maj(); vueDossier = "saisie"; afficherSaisie(d); };
+  $("ppBase").onclick = () => { delete p.peuplement; d.brouillon = true; dbPut("dossiers", d); dessinerParcellesCourantes(); vueDossier = "saisie"; afficherSaisie(d); };
 }
 function htmlZoneDossier(d) {
   return d.parcelles.map(p => (d.parcelles.length > 1 ? `<p class="note"><b>${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</b></p>` : "") + htmlZonage(p)).join("");
@@ -1281,7 +1341,8 @@ function afficherSaisie(d) {
   h += `<h3>Dossier</h3><div class="ligne"><span>N° de prospection</span><span>${esc(d.code)}</span></div>${htmlCadastre(P)}`;
   h += `<div class="groupe" style="margin-top:10px"><label for="dLieuDit">Lieu-dit (ajouté au nom du dossier et repris dans le courrier)</label><input id="dLieuDit" value="${esc(d.donnees.lieu_dit || "")}"></div>`;
   themesUtiles(d).forEach(t => {
-    h += `<h3>${esc(t.titre)}</h3>` + t.champs.map(c => htmlChamp(c, d)).join("");
+    const base = t.bois ? ` <small class="sous">(par défaut : s'applique aux parcelles non modifiées)</small>` : "";
+    h += `<h3>${esc(t.titre)}${base}</h3>` + t.champs.map(c => htmlChamp(c, d.donnees)).join("");
     if (t.photos) h += `<button class="btn btn2" id="dPhoto" type="button">📷 Prendre des photos</button><div class="photos" id="dPhotos"></div>`;
   });
   if (!aDuBois(d)) h += `<p class="note">Dossier de droit de passage uniquement : la partie peuplement n'est pas demandée.</p><div class="photos" id="dPhotos"></div><button class="btn btn2" id="dPhoto" type="button">📷 Prendre des photos</button>`;
@@ -1316,6 +1377,7 @@ function brancherSaisie(d) {
   c.querySelectorAll("#dPhoto").forEach(b => b.onclick = () => $("fichierPhoto").click());
   c.addEventListener("click", e => {
     const s = e.target.closest("[data-sup]"); if (s) { supprimerParcelle(s.dataset.sup); return; }
+    const pe = e.target.closest("[data-peupl]"); if (pe) { editerPeuplement(pe.dataset.peupl); return; }
     const pt = e.target.closest("[data-ptype]");
     if (pt) {
       const p = d.parcelles.find(x => x.idu === pt.dataset.ptype), avant = aDuBois(d);
@@ -1348,11 +1410,12 @@ function brancherSaisie(d) {
     maj();
   });
 }
-function valeurLisible(d, k) {
-  const v = [].concat(d.donnees[k] || []), a = d.donnees[k + "_autre"];
+function valeurLisibleDe(src, k) {
+  const v = [].concat(src[k] || []), a = src[k + "_autre"];
   if (a) v.push(a);
   return v.join(" + ");
 }
+function valeurLisible(d, k) { return valeurLisibleDe(d.donnees, k); }
 function reglesLisibles(d) {
   const out = [];
   REGLES.forEach(r => { const v = d.donnees[r.k]; if (v) out.push([r.l, v + (v === "OUI" && d.donnees[r.k + "_detail"] ? " : " + d.donnees[r.k + "_detail"] : "")]); });
@@ -1379,8 +1442,18 @@ function afficherFiche(d) {
   else h += peutEditer() ? `<button class="btn btn2" id="fModif" type="button">✏️ Modifier la saisie</button>` : `<p class="note">Déverrouillez le cadenas pour modifier la saisie. Le suivi se renseigne à tout moment.</p>`;
   if (d.driveUrl) h += `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(d.driveUrl)}" target="_blank" rel="noopener">📁 Ouvrir le dossier dans Drive</a>`;
   themesUtiles(d).forEach(t => {
-    const l = t.champs.map(c => ligne(c.l, valeurLisible(d, c.k))).join("");
-    h += `<h3>${esc(t.titre)}</h3>${l || `<p class="note">Rien de saisi.</p>`}`;
+    if (t.bois && d.parcelles.some(p => p.peuplement)) {
+      // Peuplement detaille par parcelle quand il varie.
+      h += `<h3>${esc(t.titre)}</h3>`;
+      d.parcelles.filter(p => typeDe(p) !== "PASSAGE").forEach(p => {
+        const src = peuplObj(d, p), n = natureDe(d, p);
+        const l = t.champs.map(c => ligne(c.l, valeurLisibleDe(src, c.k))).join("");
+        h += `<div class="parcelle" style="border-left:4px solid ${couleurParcelle(d, p).c}"><div class="peupl-ligne"><b>${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</b>${n ? `<span class="peupl-pastille" style="--c:${couleurParcelle(d, p).c}">${svgPeupl(n)}${esc(n)}</span>` : ""}${p.peuplement ? `<span class="badge gris">modifié</span>` : ""}</div>${l}</div>`;
+      });
+    } else {
+      const l = t.champs.map(c => ligne(c.l, valeurLisible(d, c.k))).join("");
+      h += `<h3>${esc(t.titre)}</h3>${l || `<p class="note">Rien de saisi.</p>`}`;
+    }
     if (t.photos) h += `<div class="photos" id="dPhotos"></div>`;
   });
   h += `<h3>Réglementation communale</h3>` + (reglesLisibles(d).map(x => ligne(x[0], x[1])).join("") || `<p class="note">Rien de saisi.</p>`);
@@ -1527,7 +1600,15 @@ async function afficherPhotos(d, edit) {
 // ---- Enregistrement -------------------------------------------
 function pourServeur(d) {
   const { brouillon, enregistre, ...reste } = d;
-  return JSON.parse(JSON.stringify(Object.assign(reste, { lisible: lisibleDossier(d) })));
+  const copie = JSON.parse(JSON.stringify(Object.assign(reste, { lisible: lisibleDossier(d) })));
+  // Peuplement lisible par parcelle : le sien s'il est modifie, sinon la base du dossier.
+  copie.parcelles.forEach((p, i) => {
+    const src = d.parcelles[i].peuplement;
+    const lp = {};
+    PEUPL_CLES.forEach(k => { const o = src || d.donnees; const v = [].concat(o[k] || []), a = o[k + "_autre"]; if (a) v.push(a); lp[k] = v.join(" + "); });
+    p.peupl_nature = lp.nature; p.lisiblePeupl = lp;
+  });
+  return copie;
 }
 function lisibleDossier(d) {
   const o = {};
@@ -1726,7 +1807,19 @@ async function ficheDossier(d) {
     ["Parcelles", d.parcelles.length + " (" + Object.keys(n).map(k => n[k] + " " + TYPES[k].l.toLowerCase()).join(", ") + ")"], ["Surface totale", ha(surf)], ["Propriétaires", proprietairesDe(d).join(", ") || "Non renseignés"]], L2);
   b += wTitre("Parcelles");
   b += wTable([["Type", "Parcelle", "Contenance", "Propriétaire(s)", "Suivi"]].concat(d.parcelles.map(p => { const e = etatSuivi(p, d); return [TYPES[typeDe(p)].l, p.etat === "ok" ? `${p.commune}\n${sansZero(p.section)} ${sansZero(p.numero)}` : "À identifier", p.contenance ? ha(p.contenance) : "—", texteProprio(p), e.lib + (e.relance ? " (à relancer)" : "")]; })), [1500, 1900, 1300, 2200, 2172], true);
-  themesUtiles(d).forEach(t => { b += wTitre(t.titre); b += wTable(t.champs.map(c => [c.l, valeurLisible(d, c.k) || "—"]), L2); });
+  themesUtiles(d).forEach(t => {
+    b += wTitre(t.titre);
+    if (t.bois && d.parcelles.some(p => p.peuplement)) {
+      // Une colonne par parcelle avec bois quand le peuplement varie.
+      const bois = d.parcelles.filter(p => typeDe(p) !== "PASSAGE");
+      const entete = ["Donnée"].concat(bois.map(p => sansZero(p.section) + " " + sansZero(p.numero)));
+      const lignes = t.champs.map(c => [c.l].concat(bois.map(p => valeurLisibleDe(peuplObj(d, p), c.k) || "—")));
+      const l1 = 2400, rest = Math.round((9072 - l1) / bois.length);
+      b += wTable([entete].concat(lignes), [l1].concat(bois.map(() => rest)), true);
+    } else {
+      b += wTable(t.champs.map(c => [c.l, valeurLisible(d, c.k) || "—"]), L2);
+    }
+  });
   const ph = (await dbAll("photos")).filter(x => x.dossierId === d.id).length;
   if (ph) b += wPar(wRun(ph + " photo(s) dans le dossier Drive.", { sz: 18 }), { avant: 60 });
   b += wTitre("Réglementation communale");
@@ -1788,20 +1881,25 @@ function dessinerProspections() {
     const initiales = String(d.auteur || "").split(/\s+/).map(x => x[0] || "").join("").toUpperCase();
     // Parcelles des collegues : contour blanc et initiales, pour eviter de prospecter deux fois.
     const collegue = user && (d.auteurId ? d.auteurId !== user.id : d.auteur !== user.nom);
-    d.parcelles.forEach(p => {
-      const t = TYPES[typeDe(p)], e = etatSuivi(p, d);
-      const style = { color: collegue ? "#ffffff" : t.c, weight: e.relance ? 3.5 : collegue ? 2.5 : 2, dashArray: e.fini ? "4 4" : null, fillColor: t.c, fillOpacity: collegue ? .45 : .32 };
+    d.parcelles.forEach((p, i) => {
+      const t = TYPES[typeDe(p)], e = etatSuivi(p, d), col = couleurParcelle(d, p);
+      // Contour : blanc pour un collegue, bleu pour une parcelle passage + bois (rappel du droit de passage), sinon la teinte du peuplement.
+      const contour = collegue ? "#ffffff" : typeDe(p) === "MIXTE" ? TYPES.PASSAGE.c : col.o;
+      const style = { color: contour, weight: e.relance ? 3.5 : collegue ? 2.5 : 2, dashArray: e.fini ? "4 4" : null, fillColor: col.c, fillOpacity: collegue ? .5 : .4 };
       const c = p.geom ? L.geoJSON(p.geom, { style }) : L.circleMarker([p.lat, p.lng], Object.assign({ radius: 8 }, style));
-      if (collegue && initiales) {
+      const logo = aLogoPeupl(d, p, i) ? svgPeupl(natureDe(d, p)) : "";
+      if (logo || (collegue && initiales)) {
         const centre = p.geom ? c.getBounds().getCenter() : L.latLng(p.lat, p.lng);
-        L.marker(centre, { interactive: false, keyboard: false, icon: L.divIcon({ className: "initiales", html: "<span>" + esc(initiales) + "</span>", iconSize: [0, 0] }) }).addTo(gInitiales);
+        const html = (logo ? `<span class="pl">${logo}</span>` : "") + (collegue && initiales ? `<span class="pi">${esc(initiales)}</span>` : "");
+        L.marker(centre, { interactive: false, keyboard: false, icon: L.divIcon({ className: "marq-parcelle", html, iconSize: [0, 0] }) }).addTo(gInitiales);
       }
       c.on("click", ev => {
         L.DomEvent.stopPropagation(ev);
         if (peutEditer() && outil !== "info") { clicCarte(ev.latlng); return; }
         ouvrirDossier(d, "fiche");
       });
-      c.bindTooltip(`${d.nom} · ${t.l} · ${initiales}`, { direction: "top", className: "etiquette" });
+      const peu = natureDe(d, p);
+      c.bindTooltip(`${d.nom} · ${t.l}${peu ? " · " + peu : ""} · ${initiales}`, { direction: "top", className: "etiquette" });
       c.addTo(gProspections);
     });
   });
