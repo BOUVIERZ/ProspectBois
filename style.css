@@ -166,3 +166,68 @@ textarea{resize:vertical;}
 .err{color:#ff9d90;}
 .initiales span{position:absolute;left:0;top:0;transform:translate(-50%,-50%);background:#fff;color:#1a2e1a;border-radius:9px;font-size:10.5px;font-weight:800;padding:1px 6px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.4);}
 #map.loin .initiales{display:none;}
+
+/* Peuplement : couleurs et logos par parcelle */
+.peupl-logo svg,.marq-parcelle .pl svg{display:block;}
+.marq-parcelle{position:relative;}
+.marq-parcelle .pl{position:absolute;left:0;top:0;transform:translate(-50%,-50%);background:#fff;border-radius:50%;padding:2px;box-shadow:0 1px 4px rgba(0,0,0,.45);display:flex;}
+.peupl-logo{background:#fff;border-radius:50%;padding:2px;box-shadow:0 1px 4px rgba(0,0,0,.45);transform:translate(-50%,-50%);width:auto!important;height:auto!important;}
+.marq-parcelle .pi{position:absolute;left:0;top:0;transform:translate(10px,-18px);background:#fff;color:#1a2e1a;border-radius:9px;font-size:10px;font-weight:800;padding:1px 5px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.4);}
+#map.loin .marq-parcelle,#map.loin .peupl-logo{display:none;}
+.peupl-ligne{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:7px;}
+.peupl-pastille{display:inline-flex;align-items:center;gap:5px;font-size:13px;font-weight:600;padding:3px 9px 3px 4px;border-radius:14px;color:#fff;background:var(--c,#555);}
+.peupl-pastille svg{background:#fff;border-radius:50%;padding:1px;}
+.peupl-pastille.vide{background:rgba(255,255,255,.12);color:var(--sauge);font-weight:500;padding-left:9px;}
+.badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--ambre);color:#2a1c05;}
+.badge.gris{background:rgba(255,255,255,.14);color:var(--sauge);}
+.lien{border:0;background:transparent;color:var(--feuille);font-size:13px;font-weight:600;text-decoration:underline;padding:3px 2px;margin-left:auto;}
+h3 .sous{font-weight:400;font-size:12px;color:var(--sauge);}
+
+/* Carte de présentation (PDF à imprimer) */
+#carteP{position:fixed;inset:0;z-index:4000;background:#2a3328;overflow:auto;text-align:center;}
+.cp-barre{position:sticky;top:0;left:0;z-index:5;display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 12px;background:#17240f;box-shadow:0 2px 8px rgba(0,0,0,.4);text-align:left;}
+.cp-barre .btn{width:auto;margin:0;padding:10px 14px;}
+.cp-case{color:#fff;font-size:13px;display:flex;align-items:center;gap:6px;margin-left:auto;}
+.cp-feuille{background:#fff;color:#17240f;width:1040px;margin:16px auto;display:flex;flex-direction:column;box-shadow:0 4px 20px rgba(0,0,0,.5);overflow:hidden;}
+.cp-titre{padding:10px 16px 8px;border-bottom:3px solid #1b7a46;}
+.cp-titre h1{margin:0;font-size:22px;color:#17240f;}
+.cp-sous{font-size:17px;font-weight:600;color:#1b7a46;}
+.cp-meta{font-size:12px;color:#555;margin-top:2px;}
+.cp-corps{position:relative;height:620px;}
+#cpMap{position:absolute;inset:0;background:#dfe6da;}
+.cp-nord{position:absolute;top:10px;right:12px;background:rgba(255,255,255,.88);border-radius:8px;padding:3px 5px;box-shadow:0 1px 4px rgba(0,0,0,.3);z-index:500;}
+.cp-legende{position:absolute;left:10px;bottom:34px;background:rgba(255,255,255,.93);border:1px solid #bbb;border-radius:8px;padding:8px 11px;font-size:12px;z-index:500;max-width:46%;box-shadow:0 1px 6px rgba(0,0,0,.25);}
+#carteP .leaflet-control-scale{margin-bottom:6px;margin-left:10px;}
+.cp-legende h2{margin:0 0 5px;font-size:13px;color:#17240f;}
+.cp-l{display:flex;align-items:center;gap:6px;margin:2px 0;}
+.cp-sw{width:16px;height:12px;border-radius:2px;border:1px solid rgba(0,0,0,.3);display:inline-block;flex:none;}
+.cp-tot{margin-top:6px;padding-top:5px;border-top:1px solid #ccc;display:flex;gap:14px;}
+.cp-tot b{color:#1b7a46;font-size:14px;}
+.cp-lbl{background:rgba(255,255,255,.82)!important;border:0!important;box-shadow:none!important;color:#102a16!important;font-weight:700!important;font-size:10px!important;padding:0 2px!important;text-align:center;line-height:1.1;}
+.cp-lbl:before{display:none!important;}
+.cp-tableau{background:#fff;color:#17240f;width:1040px;max-width:100%;margin:12px auto 16px;padding:14px 16px;box-shadow:0 4px 20px rgba(0,0,0,.5);}
+.cp-tableau h2{font-size:16px;margin:0 0 10px;color:#1b7a46;}
+.cp-tableau table{width:100%;border-collapse:collapse;font-size:12px;}
+.cp-tableau th,.cp-tableau td{border:1px solid #cfd8c9;padding:4px 7px;text-align:left;}
+.cp-tableau th{background:#eef3ea;}
+.cp-tableau .cp-total td{background:#f6f9f3;}
+@media print{
+  body>*{display:none!important;}
+  body>#carteP{display:block!important;position:static;background:#fff;overflow:visible;}
+  .cp-barre{display:none!important;}
+  .cp-feuille{box-shadow:none;margin:0 auto;}
+  .cp-tableau{box-shadow:none;margin:0 auto;page-break-before:always;break-before:page;}
+  .cp-tableau tr{page-break-inside:avoid;}
+  .cp-tableau thead{display:table-header-group;}
+  @page{size:A4 landscape;margin:8mm;}
+}
+
+/* Bannière d'alerte : données non envoyées */
+#banAttente{position:fixed;top:0;left:0;right:0;z-index:3500;background:#b23b2e;color:#fff;padding:9px 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.4);font-size:13.5px;}
+#banAttente[hidden]{display:none;}
+#banAttente .ban-txt{flex:1;min-width:180px;line-height:1.35;}
+#banAttente .ban-act{display:flex;gap:7px;flex-wrap:wrap;}
+#banAttente button{border:0;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:700;background:#fff;color:#b23b2e;}
+#banAttente button.b2{background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.5);}
+body:not(.locked) #banAttente,#banAttente:not([hidden])~.top{}
+#banAttente:not([hidden])~.top{top:58px;}
