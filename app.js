@@ -110,12 +110,14 @@ function ha(m2) { return m2 ? (m2 / 10000).toLocaleString("fr-FR", { maximumFrac
 let dbp;
 function db() {
   return dbp = dbp || new Promise((ok, ko) => {
-    const r = indexedDB.open("prospectbois", 2);
+    const r = indexedDB.open("prospectbois", 4);
     r.onupgradeneeded = () => {
       const d = r.result;
       if (!d.objectStoreNames.contains("dossiers")) ["dossiers", "annots", "photos", "courriers"].forEach(s => d.createObjectStore(s, { keyPath: "id" }));
       if (!d.objectStoreNames.contains("queue")) d.createObjectStore("queue", { keyPath: "n", autoIncrement: true });
       if (!d.objectStoreNames.contains("exclues")) d.createObjectStore("exclues", { keyPath: "id" });
+      if (!d.objectStoreNames.contains("taches")) d.createObjectStore("taches", { keyPath: "id" });
+      if (!d.objectStoreNames.contains("documents")) d.createObjectStore("documents", { keyPath: "id" });
     };
     r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error);
   });
@@ -134,7 +136,7 @@ const dbDel = (s, k) => tx(s, "readwrite", x => x.delete(k));
 
 // ---- Etat -----------------------------------------------------
 let user = null, apiUrl = CFG.apiUrl || ls("pb5_api", "");
-let dossiers = [], annots = [], exclues = [], outil = null, dossierCourant = null, enAjout = false;
+let dossiers = [], annots = [], exclues = [], taches = [], icsCle = "", outil = null, dossierCourant = null, enAjout = false;
 let map, gpsPos = null, gpsWatch = null, gpsSuit = false;
 
 // ---- API ------------------------------------------------------
@@ -267,7 +269,15 @@ async function faireSynchro() {
   for (const x of exclues) if (!nex.find(y => y.id === x.id)) await dbDel("exclues", x.id);
   for (const x of nex) await dbPut("exclues", x);
   exclues = nex;
-  dessinerProspections(); dessinerAnnots(); dessinerExclues();
+  // Taches partagees : meme fusion.
+  const tAtt = attente.filter(o => o.action === "save_tache").map(o => o.data);
+  const tSup = new Set(attente.filter(o => o.action === "delete_tache").map(o => o.id));
+  const nt = (res.taches || []).filter(x => !tSup.has(x.id) && !tAtt.find(y => y.id === x.id)).concat(tAtt);
+  for (const x of taches) if (!nt.find(y => y.id === x.id)) await dbDel("taches", x.id);
+  for (const x of nt) await dbPut("taches", x);
+  taches = nt;
+  if (res.icsCle !== undefined) icsCle = res.icsCle;
+  dessinerProspections(); dessinerAnnots(); dessinerExclues(); majPastilleAgenda();
   pastille(attente.length ? "err" : "ok");
 }
 window.addEventListener("online", () => synchroniser());
@@ -321,8 +331,8 @@ async function deconnexion() {
     if (confirm(n + " enregistrement(s) ne sont PAS encore envoyés au serveur et seront perdus si vous vous déconnectez.\n\nVoulez-vous d'abord en télécharger une copie de sauvegarde ?")) { await exporterSauvegarde(); return; }
     if (!confirm("Se déconnecter quand même et perdre ces " + n + " enregistrement(s) ?")) return;
   } else if (!confirm("Se déconnecter ?")) return;
-  for (const s of ["dossiers", "annots", "photos", "courriers", "queue", "exclues"]) await tx(s, "readwrite", x => x.clear());
-  lss("pb5_user", null); user = null; dossiers = []; annots = []; exclues = [];
+  for (const s of ["dossiers", "annots", "photos", "courriers", "queue", "exclues", "taches", "documents"]) await tx(s, "readwrite", x => x.clear());
+  lss("pb5_user", null); user = null; dossiers = []; annots = []; exclues = []; taches = [];
   dessinerProspections(); dessinerAnnots(); dessinerExclues(); verrouiller(); fermerSheet();
   $("login").hidden = false; $("lId").value = ""; $("lMdp").value = "";
 }
@@ -330,8 +340,8 @@ async function deconnexion() {
 async function demarrer() {
   $("login").hidden = true;
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  dossiers = await dbAll("dossiers"); annots = await dbAll("annots"); exclues = await dbAll("exclues");
-  initCarte(); dessinerProspections(); dessinerAnnots(); dessinerExclues();
+  dossiers = await dbAll("dossiers"); annots = await dbAll("annots"); exclues = await dbAll("exclues"); taches = await dbAll("taches");
+  initCarte(); dessinerProspections(); dessinerAnnots(); dessinerExclues(); majPastilleAgenda();
   majBanniere();
   synchroniser();
 }
@@ -899,11 +909,14 @@ async function arreterTrace() {
   } else toast("Trace trop courte, non enregistrée", 1);
   if (outil === "trace") majTrace();
 }
-async function ajouterAnnot(type, nom, pts, mesure) {
+async function creerAnnot(type, nom, pts, mesure) {
   const a = { id: uuid(), type, nom, pts, mesure, auteur: user.nom, date: new Date().toLocaleDateString("fr-FR") };
-  annots.push(a); await dbPut("annots", a); dessinerAnnots();
+  annots.push(a); await dbPut("annots", a); enfiler({ action: "save_annot", data: a });
+  return a;
+}
+async function ajouterAnnot(type, nom, pts, mesure) {
+  await creerAnnot(type, nom, pts, mesure); dessinerAnnots();
   toast("Enregistré : " + nom);
-  enfiler({ action: "save_annot", data: a });
 }
 function dessinerAnnots() {
   if (!gAnnots) return;
@@ -1668,6 +1681,7 @@ function afficherFiche(d) {
   h += ligne("N° de prospection", d.code) + ligne("Commune", [...new Set(d.parcelles.map(p => p.commune).filter(Boolean))].join(", ")) + ligne("Lieu-dit", d.donnees.lieu_dit) +
     ligne("Gestionnaire", d.auteur) + ligne("Créé le", d.cree) + ligne("Parcelles", d.parcelles.length + " · " + ha(surf)) + ligne("Propriétaires", proprietairesDe(d).join(", ") || "—");
   if (d.parcelles.some(p => p.geom)) h += `<button class="btn" id="fCarte" type="button">🗺️ Carte de présentation (PDF)</button>`;
+  if (d.parcelles.some(p => p.geom)) h += `<button class="btn btn2" id="fGpx" type="button">📤 Exporter ce dossier en GPX</button>`;
   h += `<h3>Récapitulatif complet</h3><p class="note">Peuplement, zonage et réglementation réunis sur une fiche : aperçu à l'écran, téléchargement Word ou envoi par e-mail. La fiche est aussi classée automatiquement dans le dossier Drive.</p>`;
   h += `<div class="boutons"><button class="btn" id="fApercu" type="button">👁 Aperçu de la fiche</button></div><div class="boutons"><button class="btn btn2" id="fWord" type="button">📄 Télécharger (Word)</button><button class="btn btn2" id="fMail" type="button">✉️ Par e-mail</button></div>`;
   if (arch) h += `<button class="btn btn2" id="fRestaurer" type="button">↩️ Remettre dans l'appli</button>`;
@@ -1720,6 +1734,7 @@ function htmlDetailSuivi(p, d) {
     if (e.mode) h += `<div class="choix petit mode">${["Téléphone", "Rencontre"].map(c => `<button type="button" data-mode="${esc(e.k)}" data-v="${esc(c)}" class="${v.mode === c ? "on" : ""}" ${dis}>${c}</button>`).join("")}</div>`;
     h += `<input type="date" data-sv="${esc(e.k)}" value="${esc(v.v || "")}" aria-label="${esc(e.l)} : date" ${dis || (bloque ? "disabled" : "")}>`;
     if (!fait && !bloque && !e.choix) h += `<button type="button" class="mini" data-auj="${esc(e.k)}" ${dis}>Aujourd'hui</button>`;
+    h += `<button type="button" class="mini-doc" data-doc="${esc(e.k)}" data-pidu="${esc(p.idu)}" ${dis} title="Scanner / photographier un document pour cette étape">📷</button>`;
     h += `</div>`;
     if (e.k === "contact") {
       h += `<div class="groupe"><label>Réponse / suite donnée</label><textarea rows="2" data-sv="reponse" placeholder="Ex. OK pour couper · à rappeler · ne souhaite pas…" ${dis}>${esc((f.reponse || {}).v || "")}</textarea></div>`;
@@ -1729,8 +1744,11 @@ function htmlDetailSuivi(p, d) {
       h += `<div class="groupe deux"><div><label>Volume estimé (m³)</label><input type="number" inputmode="decimal" step="any" data-sv="volume" value="${esc((f.volume || {}).v || "")}" ${dis}></div><div><label>Prix / offre (€)</label><input type="number" inputmode="decimal" step="any" data-sv="prix" value="${esc((f.prix || {}).v || "")}" ${dis}></div></div>`;
     }
   });
+  h += `</div>`;
+  // Documents de la parcelle : scans/photos rangés dans le sous-dossier Drive, + ceux déposés dans le Drive.
+  h += `<div class="groupe"><label>Documents de la parcelle</label><button type="button" class="btn btn2" data-docadd="${esc(p.idu)}" ${dis}>📷 Scanner / photographier un document</button><div class="docs-parc" id="docs-${esc(p.idu)}"><p class="note">Chargement…</p></div></div>`;
   const cl = f.cloture || {};
-  h += `</div><div class="groupe"><label>Clôturer le suivi</label><div class="choix petit">${["Terminé", "Abandonné"].map(c => `<button type="button" data-clot="${c}" class="${cl.v && cl.r === c ? "on" : ""}" ${dis}>${c}</button>`).join("")}</div></div>`;
+  h += `<div class="groupe"><label>Clôturer le suivi</label><div class="choix petit">${["Terminé", "Abandonné"].map(c => `<button type="button" data-clot="${c}" class="${cl.v && cl.r === c ? "on" : ""}" ${dis}>${c}</button>`).join("")}</div></div>`;
   h += `<div class="groupe"><label>Notes</label>${s.notes.filter(n => !n.del).map(n => `<div class="note-suivi"><small>${frDate(n.date)} · ${esc(n.par || "")}</small>${esc(n.txt)}</div>`).join("") || `<p class="note">Aucune note.</p>`}<textarea rows="2" data-note placeholder="Appel, échange, remarque…" ${dis}></textarea><button type="button" class="btn btn2" data-ajnote ${dis}>Ajouter la note</button></div>`;
   return h;
 }
@@ -1755,12 +1773,19 @@ function htmlRecapLisible(d) {
     ligne("Gestionnaire", d.auteur) + ligne("Créé le", d.cree) + ligne("Parcelles", d.parcelles.length + " · " + ha(surf)) + ligne("Propriétaires", proprietairesDe(d).join(", ") || "—");
   h += tableauParcelles(d);
   themesUtiles(d).forEach(t => {
-    if (t.bois && d.parcelles.some(p => p.peuplement)) {
+    if (t.bois) {
+      const bois = d.parcelles.filter(p => !sansBois(typeDe(p)));
+      if (!bois.length) return;
       h += `<h2>${esc(t.titre)}</h2>`;
-      d.parcelles.filter(p => !sansBois(typeDe(p))).forEach(p => {
-        const src = peuplObj(d, p), nn = natureDe(d, p);
-        const l = t.champs.map(c => ligne(c.l, valeurLisibleDe(src, c.k))).join("");
-        h += `<div class="parcelle" style="border-left:4px solid ${couleurParcelle(d, p).c}"><div class="peupl-ligne"><b>${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</b>${nn ? `<span class="peupl-pastille" style="--c:${couleurParcelle(d, p).c}">${svgPeupl(nn)}${esc(nn)}</span>` : ""}${p.peuplement ? `<span class="badge gris">modifié</span>` : ""}</div>${l}</div>`;
+      // Regroupe les parcelles qui ont le même peuplement : on ne répète pas l'info.
+      const sig = p => JSON.stringify([natureDe(d, p)].concat(t.champs.map(c => valeurLisibleDe(peuplObj(d, p), c.k))));
+      const groupes = new Map();
+      bois.forEach(p => { const s = sig(p); if (!groupes.has(s)) groupes.set(s, []); groupes.get(s).push(p); });
+      [...groupes.values()].forEach(ps => {
+        const p = ps[0], src = peuplObj(d, p), nn = natureDe(d, p);
+        const champs = t.champs.map(c => { const v = valeurLisibleDe(src, c.k); return v ? `<span><b>${esc(c.l)}</b> ${esc(v)}</span>` : ""; }).filter(Boolean).join(`<span class="sep">·</span>`);
+        const lib = ps.length === bois.length ? `Commun aux ${bois.length} parcelles` : (ps.length > 1 ? ps.length + " parcelles : " : "Parcelle ") + ps.map(x => sansZero(x.section) + " " + sansZero(x.numero)).join(", ");
+        h += `<div class="pg"><div class="pg-tete">${esc(lib)}${nn ? `<span class="pg-nat" style="--c:${couleurParcelle(d, p).c}">${esc(nn)}</span>` : ""}</div><div class="pg-champs">${champs || "Rien de précisé."}</div></div>`;
       });
     } else {
       const l = t.champs.map(c => ligne(c.l, valeurLisible(d, c.k))).join("");
@@ -1794,6 +1819,7 @@ function brancherFiche(d) {
   $("fWord").onclick = async () => { telecharger(await ficheDossier(d)); classerFicheDrive(d); };
   $("fMail").onclick = async () => { await envoyerParMail(await ficheDossier(d), `Fiche récapitulative ${d.nom}`); classerFicheDrive(d); };
   if ($("fCarte")) $("fCarte").onclick = () => cartePresentation(d);
+  if ($("fGpx")) $("fGpx").onclick = () => exporterGpx(d);
   if ($("fRestaurer")) $("fRestaurer").onclick = () => restaurer(d);
   if ($("fArchiver")) $("fArchiver").onclick = () => choisirArchivage(d);
   if ($("fModif")) $("fModif").onclick = () => { vueDossier = "saisie"; outil = "saisie"; document.querySelectorAll("[data-outil]").forEach(x => x.classList.toggle("on", x.dataset.outil === "saisie")); bandeau(null); afficherDossier(); };
@@ -1801,9 +1827,20 @@ function brancherFiche(d) {
   c.addEventListener("click", async e => {
     const t = e.target;
     const o = t.closest("[data-ouvrir]");
-    if (o) { const det = document.getElementById("det-" + o.dataset.ouvrir); det.hidden = !det.hidden; if (!det.hidden) det.innerHTML = htmlDetailSuivi(parc(o.dataset.ouvrir), d); o.textContent = det.hidden ? "Suivi ▾" : "Suivi ▴"; return; }
+    if (o) { const det = document.getElementById("det-" + o.dataset.ouvrir); det.hidden = !det.hidden; if (!det.hidden) { det.innerHTML = htmlDetailSuivi(parc(o.dataset.ouvrir), d); chargerDocuments(parc(o.dataset.ouvrir), d); } o.textContent = det.hidden ? "Suivi ▾" : "Suivi ▴"; return; }
     const m = t.closest("[data-mail]"); if (m) { const l = await courrierDe(d, parc(m.dataset.mail)); if (l) envoyerParMail(l, `Courrier ${d.nom} : ${l.destinataire || "propriétaire à compléter"}`); return; }
     const dl = t.closest("[data-dl]"); if (dl) { const l = await courrierDe(d, parc(dl.dataset.dl)); if (l) telecharger(l); return; }
+    // Documents : capture (scan/photo), ouverture, signature, e-mail.
+    const bdoc = t.closest("[data-doc]"); if (bdoc) { if (peutSuivre(d)) demanderDocument(d, parc(bdoc.dataset.pidu), bdoc.dataset.doc); return; }
+    const badd = t.closest("[data-docadd]"); if (badd) { if (peutSuivre(d)) demanderDocument(d, parc(badd.dataset.docadd), ""); return; }
+    const dact = t.closest("[data-opendoc],[data-signdoc],[data-maildoc]");
+    if (dact) {
+      const cont = t.closest(".docs-parc"), items = (cont && cont._items) || [], pp = cont && parc(cont.id.slice(5));
+      if (dact.dataset.opendoc != null) { const it = items[+dact.dataset.opendoc]; if (it && it.local) window.open(URL.createObjectURL(it.local.blob), "_blank"); }
+      else if (dact.dataset.signdoc != null) { const it = items[+dact.dataset.signdoc]; if (it && peutSuivre(d)) signerDocument(it, pp, d); }
+      else if (dact.dataset.maildoc != null) { const it = items[+dact.dataset.maildoc]; if (it) envoyerDocumentMail(it, pp); }
+      return;
+    }
     const carte = t.closest("[data-carte]"); if (!carte || !peutSuivre(d)) return;
     const p = parc(carte.dataset.carte);
     if (t.dataset.auj) { await majSuivi(d, p, t.dataset.auj, { v: isoJour() }); return; }
@@ -1824,6 +1861,139 @@ function brancherFiche(d) {
   });
 }
 function telecharger(doc) { const a = document.createElement("a"); a.href = URL.createObjectURL(doc.blob); a.download = doc.nom; document.body.appendChild(a); a.click(); a.remove(); }
+
+// ---- Import / export GPX (Iphigénie, QGIS, GPS…) ---------------
+function xmlEsc(s) { return String(s == null ? "" : s).replace(/[<>&'"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c])); }
+// Anneaux [lat,lng] d'une géométrie GeoJSON (Polygon / MultiPolygon).
+function anneauxGeom(g) {
+  const rings = []; if (!g) return rings;
+  const poly = co => co.forEach(r => rings.push(r.map(c => [c[1], c[0]])));
+  if (g.type === "Polygon") poly(g.coordinates); else if (g.type === "MultiPolygon") g.coordinates.forEach(poly);
+  return rings;
+}
+function centroideGeom(g) { const rs = anneauxGeom(g); if (!rs.length) return null; const r = rs[0]; let x = 0, y = 0; r.forEach(p => { x += p[0]; y += p[1]; }); return [x / r.length, y / r.length]; }
+function exporterGpx(dossierCible) {
+  const src = dossierCible ? [dossierCible] : dossiers;
+  let wpt = "", trk = "";
+  src.forEach(d => d.parcelles.forEach(p => {
+    anneauxGeom(p.geom).forEach(r => { trk += `<trk><name>${xmlEsc(d.nom + " · " + titreParcelle(p))}</name><trkseg>` + r.map(pt => `<trkpt lat="${pt[0]}" lon="${pt[1]}"></trkpt>`).join("") + `</trkseg></trk>`; });
+    const c = centroideGeom(p.geom); if (c) wpt += `<wpt lat="${c[0]}" lon="${c[1]}"><name>${xmlEsc(titreParcelle(p))}</name><desc>${xmlEsc(d.nom)}</desc></wpt>`;
+  }));
+  if (!dossierCible) annots.forEach(a => {
+    if (a.type === "repere") wpt += `<wpt lat="${a.pts[0][0]}" lon="${a.pts[0][1]}"><name>${xmlEsc(a.nom)}</name></wpt>`;
+    else if (a.pts.length > 1) trk += `<trk><name>${xmlEsc(a.nom)}</name><trkseg>` + a.pts.map(pt => `<trkpt lat="${pt[0]}" lon="${pt[1]}"></trkpt>`).join("") + `</trkseg></trk>`;
+  });
+  if (!wpt && !trk) { toast("Rien à exporter", 1); return; }
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="ProspectBois" xmlns="http://www.topografix.com/GPX/1/1">\n${wpt}\n${trk}\n</gpx>`;
+  telecharger({ nom: (dossierCible ? dossierCible.nom : "ProspectBois") + ".gpx", blob: new Blob([gpx], { type: "application/gpx+xml" }) });
+  toast("Export GPX prêt");
+}
+async function importerGpx(file) {
+  let txt; try { txt = await file.text(); } catch (e) { toast("Lecture du fichier impossible", 1); return; }
+  const doc = new DOMParser().parseFromString(txt, "application/xml");
+  if (doc.querySelector("parsererror") || doc.documentElement.nodeName.toLowerCase() !== "gpx") { toast("Fichier GPX illisible", 1); return; }
+  const nb = x => +(+x).toFixed(6); let n = 0;
+  for (const w of doc.getElementsByTagName("wpt")) {
+    const la = nb(w.getAttribute("lat")), lo = nb(w.getAttribute("lon"));
+    if (!isFinite(la) || !isFinite(lo)) continue;
+    const nom = (w.getElementsByTagName("name")[0] || {}).textContent || "Point importé";
+    await creerAnnot("repere", nom, [[la, lo]], ""); n++;
+  }
+  const lignes = [...doc.getElementsByTagName("trk"), ...doc.getElementsByTagName("rte")];
+  for (const t of lignes) {
+    const nom = (t.getElementsByTagName("name")[0] || {}).textContent || "Trace importée";
+    const pts = [...t.getElementsByTagName("trkpt"), ...t.getElementsByTagName("rtept")].map(p => [nb(p.getAttribute("lat")), nb(p.getAttribute("lon"))]).filter(p => isFinite(p[0]) && isFinite(p[1]));
+    if (pts.length > 1) { await creerAnnot("trace", nom, pts, fmtLong(longueur(pts.map(x => L.latLng(x[0], x[1]))))); n++; }
+  }
+  dessinerAnnots();
+  toast(n ? `${n} élément(s) GPX importé(s)` : "Aucun point ou trace dans ce GPX", n ? 0 : 1);
+}
+
+// ---- Documents des parcelles (scan/photo → Drive, signature, e-mail) ----
+let ctxDoc = null; // contexte de capture en cours
+function labelEtape(k) { const e = ETAPES.find(x => x.k === k); return e ? e.l : (k || ""); }
+function demanderDocument(d, p, etape) { if (!p) return; ctxDoc = { d, p, etape }; $("fichierDoc").click(); }
+async function creerDocument(ctx, file) {
+  let blob = file, mime = file.type || "application/octet-stream", ext = mime.includes("pdf") ? "pdf" : "jpg";
+  if (mime.startsWith("image/")) { try { blob = await reduirePhoto(file); mime = "image/jpeg"; ext = "jpg"; } catch (e) {} }
+  const d = ctx.d, p = ctx.p;
+  const base = `${d.code}_${sansZero(p.section)}${sansZero(p.numero)}${ctx.etape ? "_" + ctx.etape : ""}`.replace(/\s+/g, "");
+  const nom = `${base}_${Date.now().toString().slice(-6)}.${ext}`;
+  const doc = { id: uuid(), dossierId: d.id, dossierNom: d.nom, idu: p.idu, parcelle: labelParcelleDrive(p), etape: ctx.etape || "", nom, mime, blob, date: new Date().toLocaleDateString("fr-FR"), auteur: user.nom };
+  await dbPut("documents", doc);
+  await enfiler({ action: "save_file", source: "documents", ref: doc.id, dossierId: d.id, dossierNom: d.nom, sousDossiers: [doc.parcelle] });
+  toast("Document ajouté : " + nom);
+  return doc;
+}
+async function docsLocaux(idu) { return (await dbAll("documents")).filter(x => x.idu === idu); }
+// Liste combinee locale + Drive pour une parcelle (le lien Drive↔appli se fait tout seul).
+async function chargerDocuments(d, p) {
+  const cont = $("docs-" + p.idu); if (!cont) return;
+  const loc = await docsLocaux(p.idu);
+  let drive = [];
+  try { const r = await apiGet({ action: "get_documents", dossierId: d.id, dossierNom: d.nom, parcelle: labelParcelleDrive(p) }); if (r && r.documents) drive = r.documents; } catch (e) {}
+  const noms = new Set(loc.map(x => x.nom));
+  const items = loc.map(x => ({ local: x, nom: x.nom, etape: x.etape, date: x.date, mime: x.mime, surDrive: drive.some(y => y.nom === x.nom) }))
+    .concat(drive.filter(y => !noms.has(y.nom)).map(y => ({ drive: y, nom: y.nom, date: (y.date || "").slice(0, 10), mime: y.mime, surDrive: true })));
+  cont._items = items;
+  if (!items.length) { cont.innerHTML = `<p class="note">Aucun document. Scanne ou photographie un document sous une étape : il est rangé dans le sous-dossier Drive de la parcelle. Un document déposé dans ce dossier Drive apparaît aussi ici.</p>`; return; }
+  cont.innerHTML = items.map((it, i) => {
+    const img = (it.mime || "").startsWith("image/");
+    const voir = it.local ? `<button data-opendoc="${i}" title="Ouvrir">👁</button>${img ? `<button data-signdoc="${i}" title="Remplir / signer">✍️</button>` : ""}` : `<a href="${esc(it.drive.url)}" target="_blank" rel="noopener" title="Ouvrir dans Drive">👁</a>`;
+    return `<div class="doc-item"><span class="doc-ico">${img ? "🖼️" : "📄"}</span><div class="doc-txt"><b>${esc(it.nom)}</b><small>${it.etape ? esc(labelEtape(it.etape)) + " · " : ""}${esc(it.date || "")}${it.surDrive ? " · ✓ Drive" : " · ⏳ envoi…"}</small></div><div class="doc-act">${voir}<button data-maildoc="${i}" title="Envoyer par e-mail">✉️</button></div></div>`;
+  }).join("");
+}
+// Envoi d'un document par e-mail (proprietaire, soi, ou autre adresse).
+function envoyerDocumentMail(it, p) {
+  const emailProp = (suiviDe(p).f.email_proprio || {}).v || "";
+  ouvrirSheet("Envoyer le document", `<div class="ligne"><span>Document</span><span>${esc(it.nom)}</span></div><h3>Destinataire</h3>`
+    + `<label class="radio"><input type="radio" name="dest" value="prop" ${emailProp ? "checked" : "disabled"}> Propriétaire ${emailProp ? "(" + esc(emailProp) + ")" : "— e-mail non renseigné"}</label>`
+    + `<label class="radio"><input type="radio" name="dest" value="moi" ${emailProp ? "" : "checked"}> Moi (${esc(user.email || "e-mail non renseigné")})</label>`
+    + `<label class="radio"><input type="radio" name="dest" value="autre"> Autre adresse</label><input id="mdAutre" type="email" placeholder="adresse@exemple.fr">`
+    + `<label style="margin-top:10px">Message</label><textarea id="mdMsg" rows="3">Bonjour,\n\nVeuillez trouver ci-joint le document concernant votre parcelle.\n\nCordialement,\n${esc(user.nom)}</textarea>`
+    + `<button class="btn" id="mdOk">✉️ Envoyer</button>`);
+  $("mdOk").onclick = async () => {
+    const dest = ([...document.querySelectorAll("[name=dest]")].find(x => x.checked) || {}).value;
+    const to = dest === "prop" ? emailProp : dest === "moi" ? user.email : $("mdAutre").value.trim();
+    if (!to) { toast("Adresse e-mail manquante", 1); return; }
+    const payload = { action: "envoyer_document", to, sujet: "Document — " + it.nom, message: $("mdMsg").value, nom: it.nom, mime: it.mime };
+    if (it.local) payload.base64 = await b64(it.local.blob); else payload.fileId = it.drive.id;
+    toast("Envoi en cours…");
+    const r = await apiPost(payload);
+    if (r && r.success) { toast("Document envoyé à " + to); fermerSheet(); } else toast(r && r.error ? r.error : "Envoi impossible (réseau ?)", 1);
+  };
+}
+// Éditeur de signature / annotation sur une image (scan, photo).
+function signerDocument(it, p, d) {
+  const o = document.createElement("div"); o.id = "signP"; o.className = "sign-plein";
+  o.innerHTML = `<div class="cp-barre"><button class="btn" id="sgOk">✓ Terminer</button><button class="btn btn2" id="sgUndo">Annuler le trait</button><button class="btn btn2" id="sgClear">Tout effacer</button><label class="cp-case">Stylo <input type="range" id="sgSize" min="1" max="9" value="3"></label><button class="btn btn2" id="sgClose">Fermer</button></div><p class="cp-aide">Signe ou annote directement sur le document avec le doigt / la souris, puis Terminer.</p><div class="sign-zone"><canvas id="sgCanvas"></canvas></div>`;
+  document.body.appendChild(o);
+  const cv = $("sgCanvas"), g = cv.getContext("2d");
+  let taille = 3, dessin = false, stack = [], base = null;
+  const img = new Image();
+  img.onload = () => {
+    const sc = Math.min(1, 1100 / img.width);
+    cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc);
+    g.drawImage(img, 0, 0, cv.width, cv.height); base = g.getImageData(0, 0, cv.width, cv.height);
+  };
+  img.src = URL.createObjectURL(it.local.blob);
+  $("sgSize").oninput = e => taille = +e.target.value;
+  const pos = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height]; };
+  cv.addEventListener("pointerdown", e => { dessin = true; if (stack.length > 20) stack.shift(); stack.push(g.getImageData(0, 0, cv.width, cv.height)); const [x, y] = pos(e); g.beginPath(); g.moveTo(x, y); g.lineWidth = taille; g.lineCap = "round"; g.lineJoin = "round"; g.strokeStyle = "#0a2a6b"; try { cv.setPointerCapture(e.pointerId); } catch (_) {} e.preventDefault(); });
+  cv.addEventListener("pointermove", e => { if (!dessin) return; const [x, y] = pos(e); g.lineTo(x, y); g.stroke(); });
+  cv.addEventListener("pointerup", () => dessin = false);
+  $("sgUndo").onclick = () => { if (stack.length) g.putImageData(stack.pop(), 0, 0); };
+  $("sgClear").onclick = () => { if (base) g.putImageData(base, 0, 0); stack = []; };
+  $("sgClose").onclick = () => o.remove();
+  $("sgOk").onclick = () => cv.toBlob(async blob => {
+    const nom = it.nom.replace(/\.(jpe?g|png)$/i, "") + "_signe.jpg";
+    const doc = { id: uuid(), dossierId: d.id, dossierNom: d.nom, idu: p.idu, parcelle: labelParcelleDrive(p), etape: it.local.etape || "", nom, mime: "image/jpeg", blob, date: new Date().toLocaleDateString("fr-FR"), auteur: user.nom };
+    await dbPut("documents", doc); await enfiler({ action: "save_file", source: "documents", ref: doc.id, dossierId: d.id, dossierNom: d.nom, sousDossiers: [doc.parcelle] });
+    o.remove(); toast("Document signé enregistré"); chargerDocuments(d, p);
+    if (confirm("Envoyer le document signé par e-mail ?")) envoyerDocumentMail({ local: doc, nom, mime: "image/jpeg" }, p);
+  }, "image/jpeg", .9);
+}
+
 async function envoyerParMail(doc, sujet) {
   if (!user.email) { toast("Renseignez votre e-mail dans Compte 👤", 1); return; }
   await dbPut("courriers", doc);
@@ -1845,6 +2015,8 @@ $("fichierPhoto").onchange = async e => {
   d.brouillon = true; dbPut("dossiers", d);
   afficherPhotos(d, true);
 };
+$("fichierGpx").onchange = async e => { const f = e.target.files[0]; e.target.value = ""; if (f) await importerGpx(f); };
+$("fichierDoc").onchange = async e => { const files = [...e.target.files]; e.target.value = ""; if (!ctxDoc || !files.length) return; const ctx = ctxDoc; ctxDoc = null; for (const f of files) await creerDocument(ctx, f); chargerDocuments(ctx.d, ctx.p); };
 function reduirePhoto(f) {
   return new Promise((ok, ko) => {
     const u = URL.createObjectURL(f), i = new Image();
@@ -2169,7 +2341,7 @@ async function resoudreEnAttente() {
 }
 
 // ---- Carte de presentation (PDF a imprimer pour la mairie) ----
-let cpMap = null, cpFond = "plan", cpTable = true;
+let cpMap = null, cpFond = "plan", cpTable = true, cpTaille = 1, cpLabels = true;
 function cartePresentation(d) {
   const parcelles = d.parcelles.filter(p => p.geom);
   if (!parcelles.length) { toast("Aucune parcelle avec contour à cartographier", 1); return; }
@@ -2184,29 +2356,42 @@ function cartePresentation(d) {
   const o = document.createElement("div"); o.id = "carteP"; o.className = "fond-" + cpFond;
   o.innerHTML = `
     <div class="cp-barre">
-      <button class="btn" id="cpPrint" type="button">🖨️ Imprimer / Enregistrer en PDF</button>
+      <button class="btn" id="cpPrint" type="button">🖨️ Imprimer</button>
+      <button class="btn" id="cpSave" type="button">💾 Enregistrer (image)</button>
+      <span class="cp-sep"></span>
+      <button class="btn btn2" id="cpMoins" type="button" title="Texte plus petit">A−</button>
+      <button class="btn btn2" id="cpPlus" type="button" title="Texte plus grand">A+</button>
+      <label class="cp-case"><input type="checkbox" id="cpLbl" ${cpLabels ? "checked" : ""}> Étiquettes</label>
       <button class="btn btn2" id="cpFond" type="button">${cpFond === "plan" ? "Fond photo" : "Fond plan"}</button>
-      <label class="cp-case"><input type="checkbox" id="cpTab" ${cpTable ? "checked" : ""}> Tableau des parcelles</label>
+      <label class="cp-case"><input type="checkbox" id="cpTab" ${cpTable ? "checked" : ""}> Tableau</label>
       <button class="btn btn2" id="cpClose" type="button">Fermer</button>
     </div>
-    <div class="cp-feuille" id="cpFeuille">
+    <p class="cp-aide">Zoome librement (molette / pincement). Glisse la légende, la flèche nord et l'échelle où tu veux. Règle la taille du texte avec A− / A+.</p>
+    <div class="cp-feuille" id="cpFeuille" style="--cp-txt:${cpTaille}">
       <div class="cp-titre"><h1>Prospection forestière</h1><div class="cp-sous">${esc(communes.join(", ") || "Commune")}${d.donnees.lieu_dit ? " · " + esc(d.donnees.lieu_dit) : ""}</div><div class="cp-meta">N° ${esc(d.code)} · ${esc(d.auteur || "")} · ${esc(frDate(d.cree) || "")}</div></div>
       <div class="cp-corps"><div id="cpMap"></div>
-        <div class="cp-nord" aria-hidden="true"><svg viewBox="0 0 24 44" width="26" height="46"><polygon points="12,2 19,22 12,16 5,22" fill="#17240f"/><polygon points="12,2 12,16 5,22" fill="#4a6a3a"/><text x="12" y="38" text-anchor="middle" font-family="Arial" font-size="13" font-weight="700" fill="#17240f">N</text></svg></div>
-        <div class="cp-legende"><h2>Légende</h2>${presents.map(x => `<div class="cp-l"><span class="cp-sw" style="background:${x.c}"></span>${esc(x.nom)}</div>`).join("")}<div class="cp-tot"><div><b>${d.parcelles.length}</b> parcelles</div><div><b>${esc(ha(surf))}</b> au total</div></div></div>
+        <div class="cp-nord" data-drag aria-hidden="true"><svg viewBox="0 0 24 44" width="26" height="46"><polygon points="12,2 19,22 12,16 5,22" fill="#17240f"/><polygon points="12,2 12,16 5,22" fill="#4a6a3a"/><text x="12" y="38" text-anchor="middle" font-family="Arial" font-size="13" font-weight="700" fill="#17240f">N</text></svg></div>
+        <div class="cp-legende" data-drag><h2>Légende</h2>${presents.map(x => `<div class="cp-l"><span class="cp-sw" style="background:${x.c}"></span>${esc(x.nom)}</div>`).join("")}<div class="cp-tot"><div><b>${d.parcelles.length}</b> parcelles</div><div><b>${esc(ha(surf))}</b> au total</div></div></div>
       </div>
     </div>
     ${cpTable ? tableauParcelles(d) : ""}`;
   document.body.appendChild(o);
+  if (!cpLabels) $("cpFeuille").classList.add("sans-lbl");
+  const recharger = () => { fermerCartePresentation(); cartePresentation(d); };
   $("cpClose").onclick = fermerCartePresentation;
   $("cpPrint").onclick = () => { if (cpMap) cpMap.invalidateSize(); setTimeout(() => window.print(), 300); };
-  $("cpFond").onclick = () => { cpFond = cpFond === "plan" ? "photo" : "plan"; fermerCartePresentation(); cartePresentation(d); };
-  $("cpTab").onchange = e => { cpTable = e.target.checked; fermerCartePresentation(); cartePresentation(d); };
-  // Carte
+  $("cpSave").onclick = () => enregistrerCarteImage(d);
+  $("cpFond").onclick = () => { cpFond = cpFond === "plan" ? "photo" : "plan"; recharger(); };
+  $("cpTab").onchange = e => { cpTable = e.target.checked; recharger(); };
+  $("cpLbl").onchange = e => { cpLabels = e.target.checked; $("cpFeuille").classList.toggle("sans-lbl", !cpLabels); };
+  const majTaille = dz => { cpTaille = Math.max(.6, Math.min(2, +(cpTaille + dz).toFixed(2))); $("cpFeuille").style.setProperty("--cp-txt", cpTaille); };
+  $("cpMoins").onclick = () => majTaille(-.1);
+  $("cpPlus").onclick = () => majTaille(.1);
+  // Carte : zoom libre (zoomSnap 0) pour un reglage fin de l'echelle.
   const f = cpFond === "photo" ? ["ORTHOIMAGERY.ORTHOPHOTOS", "normal", "image/jpeg", "PM_0_19"] : ["GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2", "normal", "image/png", "PM_0_19"];
-  cpMap = L.map("cpMap", { zoomControl: false, attributionControl: true, preferCanvas: true });
+  cpMap = L.map("cpMap", { zoomControl: true, attributionControl: true, preferCanvas: true, zoomSnap: 0, zoomDelta: .25, wheelPxPerZoomLevel: 90 });
   cpMap.attributionControl.setPrefix("");
-  wmts(f[0], f[1], f[2], f[3], { maxNativeZoom: 19 }).addTo(cpMap);
+  wmts(f[0], f[1], f[2], f[3], { maxNativeZoom: 19, crossOrigin: true }).addTo(cpMap);
   const grp = L.featureGroup();
   parcelles.forEach(p => {
     const col = couleurParcelle(d, p);
@@ -2216,9 +2401,43 @@ function cartePresentation(d) {
     lay.bindTooltip(lab, { permanent: true, direction: "center", className: "cp-lbl", opacity: 1 });
   });
   grp.addTo(cpMap);
-  L.control.scale({ metric: true, imperial: false, position: "bottomleft", maxWidth: 180 }).addTo(cpMap);
+  const scaleCtl = L.control.scale({ metric: true, imperial: false, position: "bottomleft", maxWidth: 180 }).addTo(cpMap);
   try { cpMap.fitBounds(grp.getBounds().pad(.08)); } catch (e) { cpMap.setView([p0(d).lat, p0(d).lng], 15); }
-  setTimeout(() => cpMap && cpMap.invalidateSize(), 200);
+  setTimeout(() => {
+    if (!cpMap) return;
+    cpMap.invalidateSize();
+    rendreDeplacable($("cpFeuille").querySelector(".cp-nord"));
+    rendreDeplacable($("cpFeuille").querySelector(".cp-legende"));
+    if (scaleCtl._container) { L.DomEvent.disableClickPropagation(scaleCtl._container); rendreDeplacable(scaleCtl._container); }
+  }, 250);
+}
+// Rend un element librement deplacable a la souris ou au doigt, dans son conteneur.
+function rendreDeplacable(el) {
+  if (!el || el.dataset.drag === "on") return;
+  el.dataset.drag = "on"; el.classList.add("cp-mobile");
+  let ox = 0, oy = 0, sx = 0, sy = 0, drag = false;
+  el.addEventListener("pointerdown", e => {
+    const par = el.offsetParent || el.parentElement, r = el.getBoundingClientRect(), pr = par.getBoundingClientRect();
+    ox = r.left - pr.left; oy = r.top - pr.top; sx = e.clientX; sy = e.clientY; drag = true;
+    el.style.left = ox + "px"; el.style.top = oy + "px"; el.style.right = "auto"; el.style.bottom = "auto";
+    try { el.setPointerCapture(e.pointerId); } catch (_) {} e.preventDefault(); e.stopPropagation();
+  });
+  el.addEventListener("pointermove", e => { if (!drag) return; el.style.left = (ox + e.clientX - sx) + "px"; el.style.top = (oy + e.clientY - sy) + "px"; });
+  const fin = e => { drag = false; try { el.releasePointerCapture(e.pointerId); } catch (_) {} };
+  el.addEventListener("pointerup", fin); el.addEventListener("pointercancel", fin);
+}
+// Enregistre la carte de presentation en image PNG telechargeable.
+async function enregistrerCarteImage(d) {
+  if (typeof html2canvas === "undefined") { toast("Utilise Imprimer → Enregistrer en PDF", 1); return; }
+  toast("Préparation de l'image…");
+  if (cpMap) cpMap.invalidateSize();
+  try {
+    const canvas = await html2canvas($("cpFeuille"), { useCORS: true, scale: 2, backgroundColor: "#ffffff", logging: false });
+    canvas.toBlob(blob => {
+      if (!blob) { toast("Échec de l'image, utilise Imprimer", 1); return; }
+      telecharger({ nom: (d.nom || "carte") + ".png", blob }); toast("Image enregistrée");
+    }, "image/png");
+  } catch (e) { toast("Image impossible : utilise Imprimer → Enregistrer en PDF", 1); }
 }
 function p0(d) { const p = d.parcelles[0]; return p.geom ? L.geoJSON(p.geom).getBounds().getCenter() : L.latLng(p.lat, p.lng); }
 function tableauParcelles(d) {
@@ -2306,9 +2525,12 @@ function rendreListe() {
   el.querySelectorAll("[data-d]").forEach(b => b.onclick = () => ouvrirDossier(dossiers.find(x => x.id === b.dataset.d)));
 }
 $("btnDossiers").onclick = listeDossiers;
+$("btnAgenda").onclick = ouvrirAgenda;
 $("btnCompte").onclick = async () => {
   const n = await nbAttente();
-  ouvrirSheet(user.nom, `<div class="ligne"><span>Identifiant</span><span>${esc(user.id)}</span></div><div class="ligne"><span>En attente d'envoi</span><span>${n}</span></div><h3>Coordonnées reprises dans les courriers</h3><label for="cEmail">E-mail</label><input id="cEmail" type="email" value="${esc(user.email || "")}"><label for="cTel" style="margin-top:10px">Téléphone</label><input id="cTel" type="tel" value="${esc(user.tel || "")}"><button class="btn btn2" id="cProfil">Enregistrer mes coordonnées</button><h3>Suivi</h3><div class="ligne"><span>Rappel par e-mail après</span><span>${delaiRappel()} jours sans action</span></div><p class="note">Délai commun à l'équipe, modifiable dans l'onglet « Reglages » du Google Sheets.</p><h3>Application</h3>${n ? `<div class="alerte">⚠️ ${n} enregistrement(s) pas encore envoyé(s). Restez sur le réseau et ne supprimez pas l'appli tant que ce n'est pas à zéro.</div>` : ""}<button class="btn btn2" id="cSync">🔄 Synchroniser</button><button class="btn btn2" id="cSauve">💾 Sauvegarder mes données (fichier)</button><p class="note">La sauvegarde télécharge une copie de tous tes dossiers. À faire avant toute mise à jour ou réinstallation, par sécurité.</p>${user.sheetUrl ? `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(user.sheetUrl)}" target="_blank" rel="noopener">Ouvrir le Google Sheets</a>` : ""}<button class="btn danger" id="cDeco">Se déconnecter</button>`);
+  ouvrirSheet(user.nom, `<div class="ligne"><span>Identifiant</span><span>${esc(user.id)}</span></div><div class="ligne"><span>En attente d'envoi</span><span>${n}</span></div><h3>Coordonnées reprises dans les courriers</h3><label for="cEmail">E-mail</label><input id="cEmail" type="email" value="${esc(user.email || "")}"><label for="cTel" style="margin-top:10px">Téléphone</label><input id="cTel" type="tel" value="${esc(user.tel || "")}"><button class="btn btn2" id="cProfil">Enregistrer mes coordonnées</button><h3>Suivi</h3><div class="ligne"><span>Rappel par e-mail après</span><span>${delaiRappel()} jours sans action</span></div><p class="note">Délai commun à l'équipe, modifiable dans l'onglet « Reglages » du Google Sheets.</p><h3>Application</h3>${n ? `<div class="alerte">⚠️ ${n} enregistrement(s) pas encore envoyé(s). Restez sur le réseau et ne supprimez pas l'appli tant que ce n'est pas à zéro.</div>` : ""}<button class="btn btn2" id="cSync">🔄 Synchroniser</button><button class="btn btn2" id="cSauve">💾 Sauvegarder mes données (fichier)</button><p class="note">La sauvegarde télécharge une copie de tous tes dossiers. À faire avant toute mise à jour ou réinstallation, par sécurité.</p><h3>Import / export GPX</h3><button class="btn btn2" id="cGpxImp">📥 Importer un fichier GPX</button><button class="btn btn2" id="cGpxExp">📤 Exporter tout en GPX</button><p class="note">Points → repères, traces → traces, parcelles → contours. Compatible Iphigénie, QGIS, GPS…</p>${user.sheetUrl ? `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(user.sheetUrl)}" target="_blank" rel="noopener">Ouvrir le Google Sheets</a>` : ""}<button class="btn danger" id="cDeco">Se déconnecter</button>`);
+  $("cGpxImp").onclick = () => $("fichierGpx").click();
+  $("cGpxExp").onclick = () => exporterGpx(null);
   $("cSync").onclick = async () => { await synchroniser(); toast("Synchronisation terminée"); };
   $("cDeco").onclick = deconnexion;
   $("cSauve").onclick = exporterSauvegarde;
@@ -2319,6 +2541,58 @@ $("btnCompte").onclick = async () => {
     user.email = email; user.tel = tel; lss("pb5_user", user); toast("Coordonnées enregistrées");
   };
 };
+
+// ---- Tâches & agenda partagés ---------------------------------
+// Relances issues du suivi (parcelles non terminees avec une date de relance).
+function relancesAgenda() {
+  const out = [];
+  dossiers.forEach(d => d.parcelles.forEach(p => {
+    const f = suiviDe(p).f; if (!f.relance || !f.relance.v) return;
+    if (etatSuivi(p, d).fini || statutParcelle(p) === "refus") return;
+    out.push({ id: "r-" + p.idu, type: "relance", date: f.relance.v, titre: "Relance : " + texteProprio(p), sous: d.nom + " · " + titreParcelle(p), dossierId: d.id, idu: p.idu, fait: false });
+  }));
+  return out;
+}
+function itemsAgenda() {
+  const t = taches.map(x => ({ id: x.id, type: "tache", date: x.date || "", titre: x.titre, sous: (x.dossierNom || "") + (x.parcelle ? " · " + x.parcelle : ""), dossierId: x.dossierId, idu: x.idu, fait: !!x.fait }));
+  return t.concat(relancesAgenda()).sort((a, b) => (a.date || "9999").localeCompare(b.date || "9999"));
+}
+function majPastilleAgenda() {
+  const auj = isoJour(), n = itemsAgenda().filter(i => !i.fait && i.date && i.date <= auj).length, el = $("pastAgenda");
+  if (el) { el.textContent = n || ""; el.style.display = n ? "block" : "none"; }
+}
+function ouvrirAgenda() {
+  const items = itemsAgenda(), auj = isoJour(), nf = items.filter(i => !i.fait);
+  const retard = nf.filter(i => i.date && i.date < auj), aujd = nf.filter(i => i.date === auj), avenir = nf.filter(i => i.date > auj), sansD = nf.filter(i => !i.date), faites = items.filter(i => i.fait);
+  const ligne = i => `<div class="ag-item ${i.type}"><button class="ag-chk ${i.fait ? "on" : ""}" ${i.type === "relance" ? "disabled" : `data-chk="${esc(i.id)}"`} title="${i.type === "relance" ? "Relance automatique du suivi" : "Marquer fait"}">${i.fait ? "✓" : ""}</button><div class="ag-txt" ${i.dossierId ? `data-doss="${esc(i.dossierId)}"` : ""}><b>${esc(i.titre)}</b>${i.sous ? `<small>${esc(i.sous)}</small>` : ""}</div><span class="ag-date">${i.date ? frDate(i.date) : "—"}</span>${i.type === "tache" ? `<button class="ag-sup" data-sup="${esc(i.id)}" aria-label="Supprimer">✕</button>` : ""}</div>`;
+  const sec = (t, a, c) => a.length ? `<h3 class="${c || ""}">${t} (${a.length})</h3>${a.map(ligne).join("")}` : "";
+  let h = `<div class="ag-new"><input id="agTitre" placeholder="Nouvelle tâche (ex. rappeler M. Martin)"><div class="ag-new2"><input id="agDate" type="date" value="${auj}">${dossierCourant ? `<label class="ag-lier"><input type="checkbox" id="agLier"> lier à « ${esc(dossierCourant.nom)} »</label>` : ""}</div><button class="btn" id="agAjout">+ Ajouter la tâche</button></div>`;
+  h += sec("En retard", retard, "rouge") + sec("Aujourd'hui", aujd) + sec("À venir", avenir) + sec("Sans date", sansD);
+  if (faites.length) h += `<details class="ag-faites"><summary>Faites (${faites.length})</summary>${faites.map(ligne).join("")}</details>`;
+  if (!items.length) h += `<p class="note">Aucune tâche pour l'instant. Les relances notées dans le suivi des parcelles apparaissent ici automatiquement.</p>`;
+  h += `<h3>Agenda Google partagé</h3>`;
+  if (icsCle && apiUrl) h += `<p class="note">Abonne ton agenda à ce lien (Google Agenda → « Autres agendas » → « À partir de l'URL »). Il se met à jour tout seul, pour toute l'équipe.</p><input id="agIcs" readonly value="${esc(apiUrl + "?action=ics&cle=" + icsCle)}"><button class="btn btn2" id="agCopie">📋 Copier le lien de l'agenda</button>`;
+  else h += `<p class="note">Le lien d'agenda s'affichera après une synchronisation (bouton Compte → Synchroniser).</p>`;
+  ouvrirSheet("Tâches & agenda", h);
+  $("agAjout").onclick = async () => {
+    const titre = $("agTitre").value.trim(); if (!titre) { toast("Donne un titre à la tâche", 1); return; }
+    const lier = $("agLier") && $("agLier").checked && dossierCourant;
+    const t = { id: uuid(), titre, date: $("agDate").value || "", heure: "", dossierId: lier ? dossierCourant.id : "", dossierNom: lier ? dossierCourant.nom : "", idu: "", parcelle: "", fait: false, auteur: user.nom, cree: new Date().toISOString() };
+    taches.push(t); await dbPut("taches", t); enfiler({ action: "save_tache", data: t }); majPastilleAgenda(); ouvrirAgenda();
+  };
+  if ($("agCopie")) $("agCopie").onclick = () => { const i = $("agIcs"); i.select(); try { navigator.clipboard.writeText(i.value); } catch (e) {} toast("Lien copié"); };
+  $("sheetCorps").querySelectorAll("[data-chk]").forEach(b => b.onclick = () => basculerTache(b.dataset.chk));
+  $("sheetCorps").querySelectorAll("[data-sup]").forEach(b => b.onclick = () => supprimerTache(b.dataset.sup));
+  $("sheetCorps").querySelectorAll("[data-doss]").forEach(b => b.onclick = () => { const d = dossiers.find(x => x.id === b.dataset.doss); if (d) { fermerSheet(); ouvrirDossier(d, "fiche"); } });
+}
+async function basculerTache(id) {
+  const t = taches.find(x => x.id === id); if (!t) return;
+  t.fait = !t.fait; t.faitPar = t.fait ? user.nom : ""; await dbPut("taches", t); enfiler({ action: "save_tache", data: t }); majPastilleAgenda(); ouvrirAgenda();
+}
+async function supprimerTache(id) {
+  const t = taches.find(x => x.id === id); if (!t || !confirm("Supprimer « " + t.titre + " » ?")) return;
+  taches = taches.filter(x => x.id !== id); await dbDel("taches", id); enfiler({ action: "delete_tache", id }); majPastilleAgenda(); ouvrirAgenda();
+}
 
 // ---- Lancement ------------------------------------------------
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) navigator.serviceWorker.register("sw.js").catch(() => {});
