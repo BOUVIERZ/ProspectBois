@@ -36,8 +36,11 @@ const REGLES = [
 const TYPES = {
   BOIS: { l: "Bois", c: "#27ae60", dossier: "Bois" },
   PASSAGE: { l: "Droit de passage", c: "#2980b9", dossier: "Droit de passage" },
-  MIXTE: { l: "Passage + bois", c: "#e67e22", dossier: "Droit de passage + bois" }
+  MIXTE: { l: "Passage + bois", c: "#e67e22", dossier: "Droit de passage + bois" },
+  SOL_NU: { l: "Sol nu", c: "#a9794c", dossier: "Sol nu" }
 };
+// Parcelles sans bois : ni peuplement ni partie forestiere (droit de passage pur, sol nu).
+const sansBois = t => t === "PASSAGE" || t === "SOL_NU";
 // Peuplement : couleur et logo des parcelles avec bois. Le logo est colore dans la teinte du type.
 const PEUPL_CLES = ["nature", "essence", "traitement", "diametre", "sanitaire", "qualite", "couvert"];
 const SVG_SAPIN = '<path d="M8 1.4 L11 6 H9.3 L12 10.2 H4 L6.7 6 H5 Z" fill="C"/><rect x="7.3" y="10" width="1.4" height="3.3" fill="#6b4a2b"/>';
@@ -56,28 +59,40 @@ const natureBase = d => ([].concat(d.donnees.nature || [])[0]) || "";
 // Couleur de fond d'une parcelle : bleu pour le droit de passage pur, sinon la teinte du peuplement.
 function couleurParcelle(d, p) {
   if (typeDe(p) === "PASSAGE") return { c: TYPES.PASSAGE.c, o: "#1c5a85" };
+  if (typeDe(p) === "SOL_NU") return { c: TYPES.SOL_NU.c, o: "#6e4c2c" };
   const n = PEUPL[natureDe(d, p)]; return n ? { c: n.c, o: n.o } : { c: PEUPL_DEFAUT.c, o: PEUPL_DEFAUT.o };
 }
 // Logo affiche seulement sur la 1re parcelle et sur celles dont le peuplement differe de la base.
 function aLogoPeupl(d, p, i) {
-  if (typeDe(p) === "PASSAGE" || !PEUPL[natureDe(d, p)]) return false;
+  if (sansBois(typeDe(p)) || !PEUPL[natureDe(d, p)]) return false;
   return i === 0 || natureDe(d, p) !== natureBase(d);
 }
 function svgPeupl(nature) {
   const pe = PEUPL[nature]; if (!pe) return "";
   return `<svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true">${pe.svg.replace(/C/g, pe.c)}</svg>`;
 }
-// Etapes du suivi ; pos : seulement apres une reponse positive.
+// Etapes du suivi, dans l'ordre du chantier (comme le tableau de suivi).
+// choix : valeurs possibles · mode : propose Téléphone/Rencontre · pos : seulement apres une offre acceptee.
 const ETAPES = [
+  { k: "contact", l: "Propriétaire contacté", choix: ["Contacté", "Refus"], mode: 1 },
   { k: "courrier", l: "Courrier envoyé au propriétaire" },
-  { k: "retour", l: "Réponse du propriétaire", choix: ["Positive", "Négative"] },
+  { k: "offre", l: "Faire offre", choix: ["Oui", "Non", "En attente"] },
+  { k: "cubage", l: "Cubage réalisé", t: ["BOIS", "MIXTE"] },
   { k: "om_envoye", l: "Ordre de mission envoyé", t: ["BOIS", "MIXTE"], pos: 1 },
   { k: "conv_envoyee", l: "Convention de passage envoyée", t: ["PASSAGE", "MIXTE"], pos: 1 },
   { k: "om_signe", l: "Ordre de mission signé reçu", t: ["BOIS", "MIXTE"], pos: 1 },
   { k: "conv_signee", l: "Convention de passage signée reçue", t: ["PASSAGE", "MIXTE"], pos: 1 },
-  { k: "cubage", l: "Cubage réalisé", t: ["BOIS", "MIXTE"], pos: 1 },
   { k: "fiche_lot", l: "Fiche de lot envoyée au propriétaire", t: ["BOIS", "MIXTE"], pos: 1 }
 ];
+// Une etape est "faite" : contact=Contacté, offre=Oui, sinon une date renseignee.
+function etapeFaite(f, e) {
+  const v = f[e.k]; if (!v) return false;
+  if (e.k === "contact") return v.r === "Contacté";
+  if (e.k === "offre") return v.r === "Oui";
+  return !!v.v;
+}
+const offreOui = f => f.offre && f.offre.r === "Oui";
+const estRefus = f => (f.contact && f.contact.r === "Refus") || (f.offre && f.offre.r === "Non");
 
 // ---- Utilitaires ----------------------------------------------
 const $ = id => document.getElementById(id);
@@ -95,11 +110,12 @@ function ha(m2) { return m2 ? (m2 / 10000).toLocaleString("fr-FR", { maximumFrac
 let dbp;
 function db() {
   return dbp = dbp || new Promise((ok, ko) => {
-    const r = indexedDB.open("prospectbois", 1);
+    const r = indexedDB.open("prospectbois", 2);
     r.onupgradeneeded = () => {
       const d = r.result;
-      ["dossiers", "annots", "photos", "courriers"].forEach(s => d.createObjectStore(s, { keyPath: "id" }));
-      d.createObjectStore("queue", { keyPath: "n", autoIncrement: true });
+      if (!d.objectStoreNames.contains("dossiers")) ["dossiers", "annots", "photos", "courriers"].forEach(s => d.createObjectStore(s, { keyPath: "id" }));
+      if (!d.objectStoreNames.contains("queue")) d.createObjectStore("queue", { keyPath: "n", autoIncrement: true });
+      if (!d.objectStoreNames.contains("exclues")) d.createObjectStore("exclues", { keyPath: "id" });
     };
     r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error);
   });
@@ -118,7 +134,7 @@ const dbDel = (s, k) => tx(s, "readwrite", x => x.delete(k));
 
 // ---- Etat -----------------------------------------------------
 let user = null, apiUrl = CFG.apiUrl || ls("pb5_api", "");
-let dossiers = [], annots = [], outil = null, dossierCourant = null, enAjout = false;
+let dossiers = [], annots = [], exclues = [], outil = null, dossierCourant = null, enAjout = false;
 let map, gpsPos = null, gpsWatch = null, gpsSuit = false;
 
 // ---- API ------------------------------------------------------
@@ -149,7 +165,7 @@ async function preparer(op) {
   if (op.action !== "save_file" && op.action !== "envoyer_mail") return op;
   const src = await dbGet(op.source, op.ref);
   if (!src) return null;
-  return { action: op.action, dossierId: op.dossierId, dossierNom: op.dossierNom, sousDossier: op.sousDossier || "", sujet: op.sujet || "", nom: src.nom, mime: src.blob.type || MIME_DOCX, base64: await b64(src.blob) };
+  return { action: op.action, dossierId: op.dossierId, dossierNom: op.dossierNom, sousDossier: op.sousDossier || "", sousDossiers: op.sousDossiers || null, sujet: op.sujet || "", nom: src.nom, mime: src.blob.type || MIME_DOCX, base64: await b64(src.blob) };
 }
 async function vider() {
   if (envoiEnCours) return false;
@@ -165,10 +181,11 @@ async function vider() {
         const res = await apiPost(corps);
         if (!res) { pastille("err"); return false; }
         if (res.error === "non_autorise") { pastille("err"); toast("Session expirée : reconnectez-vous", 1); return false; }
-        if (res.error) toast("Refusé par le serveur : " + res.error, 1);
-        if (op.action === "save_dossier" && res.driveUrl) {
+        if (res.error === "non_autorise_dossier") toast("Modification refusée : ce dossier ne vous est pas ouvert", 1);
+        else if (res.error) toast("Refusé par le serveur : " + res.error, 1);
+        if (op.action === "save_dossier" && (res.driveUrl || res.sheetUrl)) {
           const d = dossiers.find(x => x.id === op.data.id);
-          if (d) { d.driveUrl = res.driveUrl; await dbPut("dossiers", d); }
+          if (d) { if (res.driveUrl) d.driveUrl = res.driveUrl; if (res.sheetUrl) d.sheetUrl = res.sheetUrl; await dbPut("dossiers", d); }
         }
       }
       await dbDel("queue", op.n);
@@ -243,7 +260,14 @@ async function faireSynchro() {
   for (const a of annots) if (!nouv.find(x => x.id === a.id)) await dbDel("annots", a.id);
   for (const a of nouv) await dbPut("annots", a);
   annots = nouv;
-  dessinerProspections(); dessinerAnnots();
+  // Parcelles exclues : meme logique de fusion que les annotations.
+  const exAtt = attente.filter(o => o.action === "save_exclue").map(o => o.data);
+  const exSup = new Set(attente.filter(o => o.action === "delete_exclue").map(o => o.id));
+  const nex = (res.exclues || []).filter(x => !exSup.has(x.id) && !exAtt.find(y => y.id === x.id)).concat(exAtt);
+  for (const x of exclues) if (!nex.find(y => y.id === x.id)) await dbDel("exclues", x.id);
+  for (const x of nex) await dbPut("exclues", x);
+  exclues = nex;
+  dessinerProspections(); dessinerAnnots(); dessinerExclues();
   pastille(attente.length ? "err" : "ok");
 }
 window.addEventListener("online", () => synchroniser());
@@ -297,17 +321,17 @@ async function deconnexion() {
     if (confirm(n + " enregistrement(s) ne sont PAS encore envoyés au serveur et seront perdus si vous vous déconnectez.\n\nVoulez-vous d'abord en télécharger une copie de sauvegarde ?")) { await exporterSauvegarde(); return; }
     if (!confirm("Se déconnecter quand même et perdre ces " + n + " enregistrement(s) ?")) return;
   } else if (!confirm("Se déconnecter ?")) return;
-  for (const s of ["dossiers", "annots", "photos", "courriers", "queue"]) await tx(s, "readwrite", x => x.clear());
-  lss("pb5_user", null); user = null; dossiers = []; annots = [];
-  dessinerProspections(); dessinerAnnots(); verrouiller(); fermerSheet();
+  for (const s of ["dossiers", "annots", "photos", "courriers", "queue", "exclues"]) await tx(s, "readwrite", x => x.clear());
+  lss("pb5_user", null); user = null; dossiers = []; annots = []; exclues = [];
+  dessinerProspections(); dessinerAnnots(); dessinerExclues(); verrouiller(); fermerSheet();
   $("login").hidden = false; $("lId").value = ""; $("lMdp").value = "";
 }
 
 async function demarrer() {
   $("login").hidden = true;
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  dossiers = await dbAll("dossiers"); annots = await dbAll("annots");
-  initCarte(); dessinerProspections(); dessinerAnnots();
+  dossiers = await dbAll("dossiers"); annots = await dbAll("annots"); exclues = await dbAll("exclues");
+  initCarte(); dessinerProspections(); dessinerAnnots(); dessinerExclues();
   majBanniere();
   synchroniser();
 }
@@ -473,9 +497,11 @@ function appliquerCouches() {
   CATALOGUE.forEach(c => { if (c.l && !vues.has(c.id) && map.hasLayer(c.l)) map.removeLayer(c.l); });
   if (p.equipe && !map.hasLayer(gProspections)) gProspections.addTo(map);
   if (!p.equipe && map.hasLayer(gProspections)) map.removeLayer(gProspections);
+  const voirExc = p.exclues !== false;
+  if (gExclues) { if (voirExc && !map.hasLayer(gExclues)) gExclues.addTo(map); if (!voirExc && map.hasLayer(gExclues)) map.removeLayer(gExclues); }
 }
 
-let gProspections, gAnnots, gTemp, gSel, gInitiales, carteOk = false;
+let gProspections, gAnnots, gTemp, gSel, gInitiales, gExclues, carteOk = false;
 function initCarte() {
   if (carteOk) return; carteOk = true;
   const v = ls("pb5_vue", null);
@@ -483,6 +509,7 @@ function initCarte() {
   map.attributionControl.setPrefix("");
   gProspections = L.featureGroup(); gInitiales = L.featureGroup().addTo(gProspections);
   gAnnots = L.featureGroup().addTo(map); gTemp = L.featureGroup().addTo(map); gSel = L.featureGroup().addTo(map);
+  gExclues = L.featureGroup();
   appliquerCouches();
   const zoomCls = () => $("map").classList.toggle("loin", map.getZoom() < 15);
   zoomCls();
@@ -512,6 +539,7 @@ function rendreMesCouches() {
   let h = `<h3>Fond de carte</h3><div class="fonds">${FONDS.map(f => `<button data-fond="${f.id}" class="${p.fond === f.id ? "on" : ""}"><span class="vign">${f.w ? `<img src="${esc(vignette(f))}" alt="" loading="lazy" onerror="this.remove()">` : ""}</span>${esc(f.nom)}</button>`).join("")}</div>`;
   h += `<h3>Couches affichées</h3>`;
   h += `<div class="cl"><div class="cl-tete"><button class="oeil ${p.equipe ? "on" : ""}" data-eq aria-label="Afficher ou masquer">${p.equipe ? "👁" : "◌"}</button><div class="cl-nom">Prospections de l'équipe<small>Vos parcelles : contour de la couleur du type · Collègues : contour blanc et initiales (zoom proche)</small></div></div><div class="chips legende">${Object.values(TYPES).map(t => `<span class="chip-type" style="--c:${t.c}">${esc(t.l)}</span>`).join("")}</div></div>`;
+  h += `<div class="cl"><div class="cl-tete"><button class="oeil ${p.exclues !== false ? "on" : ""}" data-exc aria-label="Afficher ou masquer">${p.exclues !== false ? "👁" : "◌"}</button><div class="cl-nom">Parcelles exclues<small>À ne pas prospecter (concurrent, sous contrat…) · en rouge ⛔</small></div></div></div>`;
   if (!p.actives.length) h += `<p class="note">Aucune couche. Ajoutez-en depuis l'onglet « Ajouter des couches ».</p>`;
   p.actives.forEach((a, i) => {
     const c = DEF_COUCHE(a.id); if (!c) return;
@@ -526,6 +554,7 @@ function rendreMesCouches() {
   const maj = f => { const q = prefs(); f(q); sauverPrefs(q); rendreMesCouches(); };
   corps.querySelectorAll("[data-fond]").forEach(b => b.onclick = () => maj(q => { q.fond = b.dataset.fond; }));
   corps.querySelector("[data-eq]").onclick = () => maj(q => { q.equipe = !q.equipe; });
+  corps.querySelector("[data-exc]").onclick = () => maj(q => { q.exclues = q.exclues === false; });
   corps.querySelectorAll("[data-vis]").forEach(b => b.onclick = () => maj(q => { const a = q.actives[+b.dataset.vis]; a.vis = !a.vis; }));
   corps.querySelectorAll("[data-haut]").forEach(b => b.onclick = () => maj(q => { const i = +b.dataset.haut; q.actives.splice(i - 1, 0, q.actives.splice(i, 1)[0]); }));
   corps.querySelectorAll("[data-bas]").forEach(b => b.onclick = () => maj(q => { const i = +b.dataset.bas; q.actives.splice(i + 1, 0, q.actives.splice(i, 1)[0]); }));
@@ -646,7 +675,17 @@ function initRechParcelle() {
       const f = "fields=nom,code,codeDepartement,codesPostaux&limit=12";
       const url = /^\d{5}$/.test(q) ? [`https://geo.api.gouv.fr/communes?code=${q}&${f}`, `https://geo.api.gouv.fr/communes?codePostal=${q}&${f}`] : [`https://geo.api.gouv.fr/communes?nom=${encodeURIComponent(q)}&boost=population&${f}`];
       let r = [];
-      try { for (const u of url) r = r.concat(await getJson(u)); } catch (e) { liste.innerHTML = `<p class="note">Recherche de commune impossible sans réseau.</p>`; return; }
+      try { for (const u of url) r = r.concat(await getJson(u)); }
+      catch (e) {
+        // Service de secours : le géocodeur de la Géoplateforme (même service, fiable, que l'onglet Lieu).
+        try {
+          const num = /^\d{5}$/.test(q);
+          const j = await getJson(`${GEOPF}/geocodage/search?q=${encodeURIComponent(q)}&type=municipality&limit=15`, 15000);
+          r = (j.features || []).map(x => ({ nom: x.properties.city || x.properties.name, code: x.properties.citycode, codeDepartement: String(x.properties.citycode || "").slice(0, 2), codesPostaux: [x.properties.postcode].filter(Boolean) })).filter(c => c.code && (!num || c.code === q || c.codesPostaux.includes(q)));
+        } catch (e2) { liste.innerHTML = `<p class="err">Recherche impossible : vérifiez votre connexion, puis réessayez.</p>`; return; }
+      }
+      // Doublons éventuels entre les deux sources.
+      r = r.filter((c, i) => c.code && r.findIndex(x => x.code === c.code) === i);
       // Savoie et Haute-Savoie en premier.
       r.sort((a, b) => (/^7[34]$/.test(b.codeDepartement) ? 1 : 0) - (/^7[34]$/.test(a.codeDepartement) ? 1 : 0));
       liste.innerHTML = r.slice(0, 8).map((c, i) => `<button data-i="${i}">${esc(c.nom)} <small>${esc(c.codeDepartement)} · INSEE ${esc(c.code)}</small></button>`).join("") || `<p class="note">Aucune commune trouvée.</p>`;
@@ -777,6 +816,7 @@ function choisirOutil(o) {
   if (o === "repere") { fermerSheet(); outilRepere(); }
   if (o === "trace") { fermerSheet(); majTrace(); }
   if (o === "info") bandeau("Touchez une parcelle pour voir ses informations.");
+  if (o === "exclure") { fermerSheet(); bandeau("Touchez une parcelle à exclure (à ne pas prospecter)."); }
   if (o === "saisie") demarrerSaisie();
 }
 function clicCarte(ll) {
@@ -784,6 +824,7 @@ function clicCarte(ll) {
   if (outil === "info") infosParcelle(ll);
   else if (outil === "mesure") { ptsDessin.push(ll); majMesure(); }
   else if (outil === "polygone") { ptsDessin.push(ll); majPolygone(); }
+  else if (outil === "exclure") exclureParcelle(ll);
   else if (outil === "saisie") choixParcelleSaisie(ll);
 }
 
@@ -884,6 +925,70 @@ function dessinerAnnots() {
     });
     couche.addTo(gAnnots);
   });
+}
+
+// ---- Parcelles exclues (couche partagee entretenue par l'equipe) ----
+// Parcelles a ne pas prospecter (concurrent, deja sous contrat, proprietaire oppose...).
+const MOTIFS_EXCL = ["Gérée par un concurrent", "Déjà sous contrat / mandat", "Propriétaire opposé", "Déjà prospectée", "Autre"];
+const COUL_EXCL = { c: "#e3342f", o: "#8f1511" };
+function exclueDe(idu) { return exclues.find(x => x.idu === idu) || null; }
+function titreExclue(x) { return (x.commune ? x.commune + " · " : "") + (x.section || x.numero ? sansZero(x.section) + " " + sansZero(x.numero) : "parcelle"); }
+function dessinerExclues() {
+  if (!gExclues) return;
+  gExclues.clearLayers();
+  exclues.forEach(x => {
+    const centre = x.geom ? L.geoJSON(x.geom).getBounds().getCenter() : L.latLng(x.lat, x.lng);
+    if (x.geom) L.geoJSON(x.geom, { style: { color: COUL_EXCL.o, weight: 2.5, dashArray: "6 4", fillColor: COUL_EXCL.c, fillOpacity: .35 }, interactive: false }).addTo(gExclues);
+    else L.circleMarker([x.lat, x.lng], { radius: 9, color: COUL_EXCL.o, weight: 2.5, dashArray: "6 4", fillColor: COUL_EXCL.c, fillOpacity: .5, interactive: false }).addTo(gExclues);
+    L.marker(centre, { interactive: false, keyboard: false, icon: L.divIcon({ className: "marq-exclue", html: "⛔", iconSize: [0, 0] }) }).addTo(gExclues);
+  });
+}
+// Formulaire d'exclusion : choix du motif et precision libre.
+function ouvrirExclusion(p, exist) {
+  const ex = exist || exclueDe(p.idu);
+  let motif = ex ? ex.motif : MOTIFS_EXCL[0];
+  const chips = MOTIFS_EXCL.map(m => `<button type="button" class="chip-motif ${m === motif ? "on" : ""}" data-motif="${esc(m)}">${esc(m)}</button>`).join("");
+  ouvrirSheet(ex ? "Modifier la parcelle exclue" : "Exclure une parcelle",
+    `<div class="ligne"><span>Parcelle</span><span>${esc(titreExclue(ex || p))}</span></div>`
+    + `<p class="note">Elle apparaîtra en rouge ⛔ et sera signalée avant toute saisie, pour toute l'équipe.</p>`
+    + `<h3>Motif</h3><div class="chips motifs" id="exMotifs">${chips}</div>`
+    + `<label for="exNote" style="display:block;margin-top:10px">Précision (facultatif)</label><textarea id="exNote" rows="2" placeholder="Ex. nom du concurrent, détail…">${esc(ex ? ex.note : "")}</textarea>`
+    + `<button class="btn danger" id="exOk">${ex ? "Enregistrer" : "⛔ Exclure cette parcelle"}</button>`
+    + (ex ? `<button class="btn btn2" id="exDel">Retirer des parcelles exclues</button>` : ""));
+  $("exMotifs").querySelectorAll("[data-motif]").forEach(b => b.onclick = () => {
+    motif = b.dataset.motif; $("exMotifs").querySelectorAll("[data-motif]").forEach(x => x.classList.toggle("on", x === b));
+  });
+  $("exOk").onclick = () => enregistrerExclusion(ex, p, motif, $("exNote").value.trim());
+  if (ex) $("exDel").onclick = () => retirerExclusion(ex);
+}
+async function enregistrerExclusion(ex, p, motif, note) {
+  if (ex) {
+    ex.motif = motif; ex.note = note; ex.auteur = user.nom; ex.date = new Date().toLocaleDateString("fr-FR");
+    await dbPut("exclues", ex); enfiler({ action: "save_exclue", data: ex });
+    toast("Parcelle exclue mise à jour");
+  } else {
+    const x = { id: uuid(), idu: p.idu, insee: p.insee || "", commune: p.commune || "", prefixe: p.prefixe || "", section: p.section || "", numero: p.numero || "", contenance: p.contenance || 0, lat: p.lat, lng: p.lng, geom: p.geom || null, motif, note, auteur: user.nom, date: new Date().toLocaleDateString("fr-FR") };
+    exclues.push(x); await dbPut("exclues", x); enfiler({ action: "save_exclue", data: x });
+    toast("Parcelle exclue : " + titreExclue(x));
+  }
+  dessinerExclues(); fermerSheet();
+  if (outil === "exclure") bandeau("Touchez une autre parcelle à exclure, ou changez d'outil.");
+}
+async function retirerExclusion(ex) {
+  if (!confirm("Retirer « " + titreExclue(ex) + " » des parcelles exclues ?")) return;
+  exclues = exclues.filter(y => y.id !== ex.id);
+  await dbDel("exclues", ex.id); enfiler({ action: "delete_exclue", id: ex.id });
+  dessinerExclues(); fermerSheet(); toast("Parcelle retirée des exclues");
+}
+// Outil « Exclure » : identifie la parcelle touchee puis ouvre le motif.
+async function exclureParcelle(ll) {
+  bandeau("Recherche de la parcelle…");
+  let p;
+  try { p = await chercherParcelle(ll); } catch (e) { bandeau(null); toast(msgCadastre(e), 1); return; }
+  if (outil !== "exclure") return;
+  bandeau("Touchez une parcelle à exclure.");
+  if (!p) { toast("Aucune parcelle à cet endroit", 1); return; }
+  ouvrirExclusion(p);
 }
 
 // ---- Interrogation des services publics -----------------------
@@ -1076,9 +1181,14 @@ async function montrerParcelle(p) {
   parcelleInfo = p; surligner(p);
   const rendre = () => {
     if (parcelleInfo !== p) return;
-    const d = cherchePar(p.idu), saisir = !document.body.classList.contains("locked") && !dossierCourant && !d;
-    ouvrirSheet(`${p.commune} · ${p.section} ${p.numero}`, htmlCadastre(p) + (d ? `<div class="alerte">Déjà dans le dossier ${esc(d.nom)}, par ${esc(d.auteur)}.</div>` : "") + (saisir ? `<button class="btn" id="pSaisir">📝 Saisir cette parcelle</button>` : "") + `<h3>Zonage réglementaire</h3>` + htmlZonage(p));
+    const d = cherchePar(p.idu), ex = exclueDe(p.idu), libre = !document.body.classList.contains("locked");
+    const saisir = libre && !dossierCourant && !d;
+    const bannEx = ex ? `<div class="alerte rouge">⛔ <b>Parcelle exclue</b> — ${esc(ex.motif)}${ex.note ? " · " + esc(ex.note) : ""}<br><small>à ne pas prospecter · par ${esc(ex.auteur)} le ${esc(ex.date)}</small></div>` : "";
+    const actEx = libre ? (ex ? `<div class="boutons"><button class="btn btn2" id="pExclMod">Modifier le motif</button><button class="btn btn2" id="pExclDel">Retirer des exclues</button></div>` : `<button class="btn btn2" id="pExcl">⛔ Exclure cette parcelle</button>`) : "";
+    ouvrirSheet(`${p.commune} · ${p.section} ${p.numero}`, htmlCadastre(p) + bannEx + (d ? `<div class="alerte">Déjà dans le dossier ${esc(d.nom)}, par ${esc(d.auteur)}.</div>` : "") + (saisir ? `<button class="btn" id="pSaisir">📝 Saisir cette parcelle</button>` : "") + actEx + `<h3>Zonage réglementaire</h3>` + htmlZonage(p));
     if (saisir) $("pSaisir").onclick = () => choisirOutil("saisie");
+    if (libre && ex) { $("pExclMod").onclick = () => ouvrirExclusion(p, ex); $("pExclDel").onclick = () => retirerExclusion(ex); }
+    if (libre && !ex) $("pExcl").onclick = () => ouvrirExclusion(p);
   };
   rendre();
   await chargerZonage(p); rendre();
@@ -1087,12 +1197,12 @@ async function montrerParcelle(p) {
 // ---- Dossiers -------------------------------------------------
 function monContact() { return { nom: user.nom, email: user.email || "", tel: user.tel || "" }; }
 const typeDe = p => TYPES[p.type] ? p.type : "BOIS";
-const aDuBois = d => d.parcelles.some(p => typeDe(p) !== "PASSAGE");
+const aDuBois = d => d.parcelles.some(p => !sansBois(typeDe(p)));
 function nomDossier(d) {
   const base = (d.commune ? slug(d.commune) : "A-IDENTIFIER") + "-" + d.code, ld = slug(d.donnees.lieu_dit || "");
   return ld ? base + "-" + ld : base;
 }
-let typeCourant = ls("pb5_type", "BOIS");
+let typeCourant = ls("pb5_type", "BOIS"), peuplementCourant = ls("pb5_peupl", "");
 function nouveauDossier(p) {
   const d = {
     id: uuid(), code: codeDossier(), nom: "", commune: p.etat === "ok" ? p.commune : "", insee: p.insee,
@@ -1102,17 +1212,35 @@ function nouveauDossier(p) {
   d.nom = nomDossier(d);
   return d;
 }
-function preparerParcelle(p) { p.type = typeCourant; p.ajoute = isoJour(); return p; }
+function preparerParcelle(p) {
+  p.type = typeCourant; p.ajoute = isoJour();
+  // Peuplement choisi dans le bandeau : applique a la parcelle (sauf passage et sol nu).
+  if (!sansBois(typeCourant) && peuplementCourant) p.peuplement = Object.assign(p.peuplement || {}, { nature: [peuplementCourant] });
+  return p;
+}
 function htmlTypes() {
   return `<div class="types">${Object.keys(TYPES).map(k => `<button type="button" data-type="${k}" class="${k === typeCourant ? "on" : ""}" style="--c:${TYPES[k].c}">${esc(TYPES[k].l)}</button>`).join("")}</div>`;
 }
-// Bandeau de saisie : choix du type, puis toucher la parcelle.
+// Choix rapide du peuplement, masque pour le droit de passage et le sol nu.
+function htmlPeuplChoix() {
+  if (sansBois(typeCourant)) return "";
+  const b = k => `<button type="button" data-peu="${esc(k)}" class="${k === peuplementCourant ? "on" : ""}" style="--c:${k ? PEUPL[k].c : "#8a9a9a"}">${k ? svgPeupl(k) + esc(k) : "Non précisé"}</button>`;
+  return `<div class="peupl-choix">${Object.keys(PEUPL).map(b).join("")}${b("")}</div>`;
+}
+// Bandeau de saisie : choix du type et du peuplement, puis toucher la parcelle.
 function bandeauSaisie(texte, boutons) {
-  bandeau(`${texte}${htmlTypes()}`, boutons);
-  $("bandeau").querySelectorAll("[data-type]").forEach(b => b.onclick = () => {
-    typeCourant = b.dataset.type; lss("pb5_type", typeCourant);
-    $("bandeau").querySelectorAll("[data-type]").forEach(x => x.classList.toggle("on", x === b));
+  bandeau(`${texte}${htmlTypes()}<div id="peuChoix">${htmlPeuplChoix()}</div>`, boutons);
+  const bd = $("bandeau");
+  const wirePeu = () => bd.querySelectorAll("[data-peu]").forEach(b => b.onclick = () => {
+    peuplementCourant = b.dataset.peu; lss("pb5_peupl", peuplementCourant);
+    bd.querySelectorAll("[data-peu]").forEach(x => x.classList.toggle("on", x === b));
   });
+  bd.querySelectorAll("[data-type]").forEach(b => b.onclick = () => {
+    typeCourant = b.dataset.type; lss("pb5_type", typeCourant);
+    bd.querySelectorAll("[data-type]").forEach(x => x.classList.toggle("on", x === b));
+    $("peuChoix").innerHTML = htmlPeuplChoix(); wirePeu();
+  });
+  wirePeu();
 }
 const texteDebut = () => "Type de la parcelle, puis touchez-la sur la carte.";
 async function demarrerSaisie() {
@@ -1147,6 +1275,8 @@ async function choixParcelleSaisie(ll) {
   bandeau("Recherche de la parcelle…");
   const p = await identifierOuProvisoire(ll);
   if (!p) { reprendre(); return; }
+  const ex = exclueDe(p.idu);
+  if (ex && !confirm("⛔ Parcelle exclue — " + ex.motif + (ex.note ? " (" + ex.note + ")" : "") + ".\nElle est marquée « à ne pas prospecter ». La saisir quand même ?")) { reprendre(); return; }
   preparerParcelle(p);
   if (enAjout) await ajouterParcelle(p); else await creerDossierAvec(p);
 }
@@ -1231,17 +1361,53 @@ function etatSuivi(p, d) {
   const f = suiviDe(p).f, et = etapesDe(p);
   const dates = [datePros(p, d)].concat(Object.keys(f).filter(k => k !== "prospection").map(k => f[k].v).filter(v => /^\d{4}-/.test(v || "")), suiviDe(p).notes.filter(n => !n.del).map(n => n.date));
   const derniere = dates.filter(Boolean).sort().pop() || "";
-  const faites = et.filter(e => f[e.k] && f[e.k].v).length;
+  const faites = et.filter(e => etapeFaite(f, e)).length;
   let r;
   if (f.cloture && f.cloture.v) r = { lib: f.cloture.r || "Clôturé", fini: true, cls: "fin" };
-  else if (f.retour && f.retour.v && f.retour.r === "Négative") r = { lib: "Refus du propriétaire", fini: true, cls: "refus" };
+  else if (estRefus(f)) r = { lib: f.offre && f.offre.r === "Non" ? "Pas d'offre" : "Refus du propriétaire", fini: true, cls: "refus" };
   else {
-    const proch = et.find(e => !(f[e.k] && f[e.k].v));
+    const proch = et.find(e => !etapeFaite(f, e) && !(e.pos && !offreOui(f)));
     r = proch ? { lib: proch.l, fini: false, cls: "encours", prochaine: proch.k } : { lib: "Suivi terminé", fini: true, cls: "fin" };
   }
   r.faites = faites; r.total = et.length; r.derniere = derniere;
-  r.relance = !r.fini && d.enregistre && joursDepuis(derniere) > delaiRappel();
+  // Relance : par date de relance saisie, ou faute de quoi par le delai sans action.
+  const dRelance = f.relance && f.relance.v;
+  r.relance = !r.fini && d.enregistre && (dRelance ? dRelance <= isoJour() : joursDepuis(derniere) > delaiRappel());
   return r;
+}
+// Statut synthetique d'une parcelle (pour les compteurs et la couleur d'avancement).
+function statutParcelle(p) {
+  const f = suiviDe(p).f;
+  if (f.cloture && f.cloture.v) return f.cloture.r === "Abandonné" ? "refus" : "termine";
+  if (estRefus(f)) return "refus";
+  if (f.fiche_lot && f.fiche_lot.v) return "fiche";
+  if ((f.om_signe && f.om_signe.v) || (f.conv_signee && f.conv_signee.v)) return "signe";
+  if (offreOui(f)) return "offre";
+  if (f.contact && f.contact.r === "Contacté") return "contacte";
+  return "acontacter";
+}
+const STATUTS = { acontacter: { l: "À contacter", c: "#8a9a9a" }, contacte: { l: "Contacté", c: "#2980b9" }, offre: { l: "Offre faite", c: "#8e44ad" }, signe: { l: "OM / convention signé", c: "#27ae60" }, fiche: { l: "Fiche de lot envoyée", c: "#16794a" }, termine: { l: "Terminé", c: "#145a37" }, refus: { l: "Refus / sans suite", c: "#c0392b" } };
+// Synthese d'avancement d'un dossier : pourcentage global + compteurs par palier.
+function syntheseDossier(d) {
+  let faites = 0, total = 0;
+  const c = { acontacter: 0, contacte: 0, offre: 0, signe: 0, fiche: 0, termine: 0, refus: 0, relance: 0 };
+  d.parcelles.forEach(p => {
+    const f = suiviDe(p).f, et = etapesDe(p), e = etatSuivi(p, d);
+    total += et.length; faites += et.filter(x => etapeFaite(f, x)).length;
+    c[statutParcelle(p)]++;
+    if (e.relance) c.relance++;
+  });
+  c.pc = total ? Math.round(faites / total * 100) : 0;
+  c.nb = d.parcelles.length;
+  return c;
+}
+// Bloc de synthese affiche en en-tete du dossier.
+function syntheseHtml(d) {
+  if (!d.enregistre) return "";
+  const c = syntheseDossier(d);
+  const items = [["contacte", "contactés"], ["offre", "offres faites"], ["signe", "OM/conv. signés"], ["fiche", "fiches de lot"], ["termine", "terminés"], ["refus", "refus / sans suite"], ["acontacter", "à contacter"]];
+  const puces = items.filter(([k]) => c[k]).map(([k, l]) => `<span class="syn-puce" style="--c:${STATUTS[k].c}"><b>${c[k]}</b> ${l}</span>`).join("");
+  return `<div class="synthese"><div class="syn-tete"><b>Avancement du lot</b><span class="syn-pc">${c.pc} %</span></div><div class="prog gros"><i style="width:${c.pc}%"></i></div><div class="syn-puces">${puces || `<span class="note">Aucune parcelle encore avancée.</span>`}</div>${c.relance ? `<div class="syn-relance">🔔 ${c.relance} parcelle(s) à relancer</div>` : ""}</div>`;
 }
 const delaiRappel = () => Number(ls("pb5_reglages", {}).delai_rappel_jours) || 30;
 function fusionSuivi(a, b) {
@@ -1310,6 +1476,18 @@ async function restaurer(d) {
 // ---- Affichage d'un dossier -----------------------------------
 let vueDossier = "fiche";
 function peutEditer() { return !document.body.classList.contains("locked"); }
+// Partage : le proprietaire du dossier peut ouvrir la gestion et le suivi a ses collegues.
+function estProprioDossier(d) { return !user || !d.auteurId || d.auteurId === user.id; }
+function peutGererDossier(d) { return !d.archive && (estProprioDossier(d) || !!d.partage); }
+// Modifier la saisie : cadenas ouvert + droit sur le dossier. Suivi : dossier enregistre + droit.
+function peutModifier(d) { return peutEditer() && peutGererDossier(d); }
+function peutSuivre(d) { return d.enregistre && peutGererDossier(d); }
+async function basculerPartage(d) {
+  d.partage = !d.partage; await dbPut("dossiers", d);
+  await enfiler({ action: "set_partage", dossierId: d.id, partage: !!d.partage });
+  toast(d.partage ? "Gestion et suivi ouverts à l'équipe" : "Gestion et suivi réservés à vous");
+  afficherDossier();
+}
 // src = objet source (base d.donnees ou peuplement d'une parcelle) ; pidu = parcelle ciblee pour la saisie par parcelle.
 function htmlChamp(c, src, pidu) {
   const v = [].concat(src[c.k] || []), autre = src[c.k + "_autre"] || "", pp = pidu ? ` data-parcelle="${esc(pidu)}"` : "";
@@ -1325,7 +1503,7 @@ const chipType = k => `<span class="chip-type" style="--c:${TYPES[k].c}">${esc(T
 function htmlParcelleSaisie(p, d) {
   const k = typeDe(p), i = d.parcelles.indexOf(p), col = couleurParcelle(d, p);
   let peu = "";
-  if (k !== "PASSAGE") {
+  if (!sansBois(k)) {
     const n = natureDe(d, p), modif = !!p.peuplement, dif = modif && n !== natureBase(d);
     peu = `<div class="peupl-ligne">${n ? `<span class="peupl-pastille" style="--c:${col.c}">${svgPeupl(n) || ""}${esc(n)}</span>` : `<span class="peupl-pastille vide">peuplement non précisé</span>`}${dif ? `<span class="badge">différent de la base</span>` : modif ? `<span class="badge gris">modifié</span>` : i === 0 ? `<span class="badge gris">base</span>` : ""}<button type="button" class="lien" data-peupl="${esc(p.idu)}">${modif ? "Modifier" : "Peuplement différent ?"}</button></div>`;
   }
@@ -1353,16 +1531,32 @@ function editerPeuplement(idu) {
   $("ppOk").onclick = () => { maj(); vueDossier = "saisie"; afficherSaisie(d); };
   $("ppBase").onclick = () => { delete p.peuplement; d.brouillon = true; dbPut("dossiers", d); dessinerParcellesCourantes(); vueDossier = "saisie"; afficherSaisie(d); };
 }
+// Signature du zonage d'une parcelle : deux parcelles de meme signature ont le meme zonage.
+function sigZonage(p) {
+  if (p.etat !== "ok") return "etat:" + p.etat;
+  if (p.zonageManquants === null) return "attente";
+  return JSON.stringify((p.zonage || []).map(z => z.type + "|" + (z.nom || "")).sort()) + "#" + JSON.stringify((p.zonageManquants || []).slice().sort());
+}
+// Zonage du dossier : on ne repete pas l'info quand plusieurs parcelles ont le meme zonage.
 function htmlZoneDossier(d) {
-  return d.parcelles.map(p => (d.parcelles.length > 1 ? `<p class="note"><b>${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</b></p>` : "") + htmlZonage(p)).join("");
+  if (d.parcelles.length === 1) return htmlZonage(d.parcelles[0]);
+  const groupes = new Map();
+  d.parcelles.forEach(p => { const s = sigZonage(p); if (!groupes.has(s)) groupes.set(s, []); groupes.get(s).push(p); });
+  if (groupes.size === 1) return `<p class="note">Zonage identique pour les ${d.parcelles.length} parcelles.</p>` + htmlZonage(d.parcelles[0]);
+  let h = `<p class="note">Zonage regroupé : une parcelle n'est détaillée que si son zonage diffère des autres.</p>`;
+  [...groupes.values()].forEach(ps => {
+    const lib = ps.map(p => sansZero(p.section) + " " + sansZero(p.numero)).join(", ");
+    h += `<div class="zone-groupe"><div class="zg-tete">${ps.length > 1 ? ps.length + " parcelles : " : "Parcelle "}${esc(lib)}</div>${htmlZonage(ps[0])}</div>`;
+  });
+  return h;
 }
 function themesUtiles(d) { return THEMES.filter(t => !t.bois || aDuBois(d)); }
 function afficherDossier() {
   const d = dossierCourant; if (!d) return;
-  if (vueDossier === "saisie" && peutEditer()) afficherSaisie(d); else afficherFiche(d);
+  if (vueDossier === "saisie" && peutModifier(d)) afficherSaisie(d); else afficherFiche(d);
 }
 function ouvrirDossier(d, vue) {
-  dossierCourant = d; vueDossier = vue || (d.brouillon && peutEditer() ? "saisie" : "fiche");
+  dossierCourant = d; vueDossier = vue || (d.brouillon && peutModifier(d) ? "saisie" : "fiche");
   const p = d.parcelles[0];
   if (p && map) map.setView([p.lat, p.lng], Math.max(map.getZoom(), 15));
   afficherDossier();
@@ -1474,27 +1668,19 @@ function afficherFiche(d) {
   h += ligne("N° de prospection", d.code) + ligne("Commune", [...new Set(d.parcelles.map(p => p.commune).filter(Boolean))].join(", ")) + ligne("Lieu-dit", d.donnees.lieu_dit) +
     ligne("Gestionnaire", d.auteur) + ligne("Créé le", d.cree) + ligne("Parcelles", d.parcelles.length + " · " + ha(surf)) + ligne("Propriétaires", proprietairesDe(d).join(", ") || "—");
   if (d.parcelles.some(p => p.geom)) h += `<button class="btn" id="fCarte" type="button">🗺️ Carte de présentation (PDF)</button>`;
-  h += `<div class="boutons"><button class="btn btn2" id="fWord" type="button">📄 Fiche récap (Word)</button><button class="btn btn2" id="fMail" type="button">✉️ Recevoir la fiche</button></div>`;
+  h += `<h3>Récapitulatif complet</h3><p class="note">Peuplement, zonage et réglementation réunis sur une fiche : aperçu à l'écran, téléchargement Word ou envoi par e-mail. La fiche est aussi classée automatiquement dans le dossier Drive.</p>`;
+  h += `<div class="boutons"><button class="btn" id="fApercu" type="button">👁 Aperçu de la fiche</button></div><div class="boutons"><button class="btn btn2" id="fWord" type="button">📄 Télécharger (Word)</button><button class="btn btn2" id="fMail" type="button">✉️ Par e-mail</button></div>`;
   if (arch) h += `<button class="btn btn2" id="fRestaurer" type="button">↩️ Remettre dans l'appli</button>`;
-  else h += peutEditer() ? `<button class="btn btn2" id="fModif" type="button">✏️ Modifier la saisie</button>` : `<p class="note">Déverrouillez le cadenas pour modifier la saisie. Le suivi se renseigne à tout moment.</p>`;
+  else if (peutGererDossier(d)) h += peutEditer() ? `<button class="btn btn2" id="fModif" type="button">✏️ Modifier la saisie</button>` : `<p class="note">Déverrouillez le cadenas 🔓 pour modifier la saisie. Le suivi se renseigne à tout moment.</p>`;
+  else h += `<p class="note">Dossier de ${esc(d.auteur)} : suivi en lecture seule. ${esc(d.auteur)} peut vous ouvrir la gestion depuis « Partage ».</p>`;
   if (d.driveUrl) h += `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(d.driveUrl)}" target="_blank" rel="noopener">📁 Ouvrir le dossier dans Drive</a>`;
-  themesUtiles(d).forEach(t => {
-    if (t.bois && d.parcelles.some(p => p.peuplement)) {
-      // Peuplement detaille par parcelle quand il varie.
-      h += `<h3>${esc(t.titre)}</h3>`;
-      d.parcelles.filter(p => typeDe(p) !== "PASSAGE").forEach(p => {
-        const src = peuplObj(d, p), n = natureDe(d, p);
-        const l = t.champs.map(c => ligne(c.l, valeurLisibleDe(src, c.k))).join("");
-        h += `<div class="parcelle" style="border-left:4px solid ${couleurParcelle(d, p).c}"><div class="peupl-ligne"><b>${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</b>${n ? `<span class="peupl-pastille" style="--c:${couleurParcelle(d, p).c}">${svgPeupl(n)}${esc(n)}</span>` : ""}${p.peuplement ? `<span class="badge gris">modifié</span>` : ""}</div>${l}</div>`;
-      });
-    } else {
-      const l = t.champs.map(c => ligne(c.l, valeurLisible(d, c.k))).join("");
-      h += `<h3>${esc(t.titre)}</h3>${l || `<p class="note">Rien de saisi.</p>`}`;
-    }
-    if (t.photos) h += `<div class="photos" id="dPhotos"></div>`;
-  });
-  h += `<h3>Réglementation communale</h3>` + (reglesLisibles(d).map(x => ligne(x[0], x[1])).join("") || `<p class="note">Rien de saisi.</p>`);
-  h += `<h3>Zonage réglementaire</h3><div id="dZonage">${htmlZoneDossier(d)}</div>`;
+  // Partage : seul le proprietaire ouvre/ferme la gestion et le suivi aux collegues.
+  if (!arch && estProprioDossier(d) && d.auteurId) h += `<div class="partage"><div class="pg-txt">${d.partage ? "🔓 Gestion et suivi <b>ouverts à l'équipe</b> : tes collègues peuvent modifier." : "🔒 Gestion et suivi <b>réservés à toi</b>."}</div><button class="btn btn2" id="fPartage" type="button">${d.partage ? "Réserver à moi" : "Ouvrir à l'équipe"}</button></div>`;
+  else if (!arch && !estProprioDossier(d) && d.partage) h += `<p class="note">🔓 ${esc(d.auteur)} t'a ouvert la gestion et le suivi de ce dossier.</p>`;
+  if (d.driveUrl) h += `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(d.sheetUrl || d.driveUrl)}" target="_blank" rel="noopener">📊 Tableau de suivi du dossier</a>`;
+  // Synthese d'avancement du lot
+  h += syntheseHtml(d);
+  h += `<h3>Photos</h3><div class="photos" id="dPhotos"></div>`;
   h += `<h3>Suivi des parcelles</h3>`;
   if (!d.enregistre) h += `<p class="note">Le suivi démarre une fois le dossier enregistré.</p>`;
   Object.keys(TYPES).forEach(k => {
@@ -1509,8 +1695,8 @@ function afficherFiche(d) {
   afficherPhotos(d, false);
 }
 function htmlEnteteSuivi(p, d) {
-  const e = etatSuivi(p, d), pc = e.total ? Math.round(e.faites / e.total * 100) : 0;
-  return `<div class="t"><b>${esc(titreParcelle(p))}</b><small>${p.contenance ? ha(p.contenance) + " · " : ""}${esc(texteProprio(p))}</small></div>
+  const e = etatSuivi(p, d), pc = e.total ? Math.round(e.faites / e.total * 100) : 0, st = STATUTS[statutParcelle(p)];
+  return `<div class="t"><b>${esc(titreParcelle(p))}</b> <span class="statut-pill" style="--c:${st.c}">${esc(st.l)}</span><small>${p.contenance ? ha(p.contenance) + " · " : ""}${esc(texteProprio(p))}</small></div>
     <div class="etat ${e.cls}">${e.fini ? "" : "Prochaine étape : "}<b>${esc(e.lib)}</b>${e.relance ? `<span class="relance">À relancer · ${joursDepuis(e.derniere)} j</span>` : ""}</div>
     <div class="prog"><i style="width:${pc}%"></i></div><small class="note">${e.faites}/${e.total} étapes · dernière action ${frDate(e.derniere) || "—"}</small>`;
 }
@@ -1521,20 +1707,27 @@ function htmlCarteSuivi(p, d) {
     <div class="detail" id="det-${id}" hidden></div></div>`;
 }
 function htmlDetailSuivi(p, d) {
-  const s = suiviDe(p), f = s.f, ok = d.enregistre && !d.archive, dis = ok ? "" : "disabled";
-  const pos = f.retour && f.retour.v && f.retour.r === "Positive";
+  const s = suiviDe(p), f = s.f, ok = peutSuivre(d), dis = ok ? "" : "disabled";
   let h = `<div class="groupe"><label>Date de prospection</label><input type="date" data-sv="prospection" value="${esc(datePros(p, d))}" ${dis}></div>`;
-  h += `<div class="groupe"><label>Contact du propriétaire</label><input type="email" data-sv="email_proprio" placeholder="E-mail" value="${esc((f.email_proprio || {}).v || "")}" ${dis}><input class="autre" type="tel" data-sv="tel_proprio" placeholder="Téléphone" value="${esc((f.tel_proprio || {}).v || "")}" ${dis}>`;
+  h += `<div class="groupe"><label>Contact du propriétaire</label><input type="email" data-sv="email_proprio" placeholder="E-mail" value="${esc((f.email_proprio || {}).v || "")}" ${dis}><input class="autre" type="tel" data-sv="tel_proprio" placeholder="Téléphone" value="${esc((f.tel_proprio || {}).v || "")}" ${dis}><input class="autre" type="text" data-sv="indivisaire" placeholder="Indivisaire / autre contact" value="${esc((f.indivisaire || {}).v || "")}" ${dis}>`;
   const em = (f.email_proprio || {}).v, te = (f.tel_proprio || {}).v;
   if (em || te) h += `<div class="liens">${em ? `<a href="mailto:${esc(em)}">✉️ Écrire</a>` : ""}${te ? `<a href="tel:${esc(String(te).replace(/\s/g, ""))}">📞 Appeler</a>` : ""}</div>`;
   h += `</div><div class="etapes">`;
   etapesDe(p).forEach(e => {
-    const v = f[e.k] || {}, fait = !!v.v, bloque = e.pos && !pos;
-    h += `<div class="etape ${fait ? "fait" : ""} ${bloque ? "bloque" : ""}"><span class="ico">${fait ? "✓" : ""}</span><div class="lib">${esc(e.l)}${bloque ? `<small>Après une réponse positive</small>` : ""}${fait && v.par ? `<small>par ${esc(v.par)}</small>` : ""}</div>`;
+    const v = f[e.k] || {}, fait = etapeFaite(f, e), bloque = e.pos && !offreOui(f);
+    h += `<div class="etape ${fait ? "fait" : ""} ${bloque ? "bloque" : ""}"><span class="ico">${fait ? "✓" : ""}</span><div class="lib">${esc(e.l)}${bloque ? `<small>Après une offre acceptée</small>` : ""}${v.par ? `<small>par ${esc(v.par)}</small>` : ""}</div>`;
     if (e.choix) h += `<div class="choix petit">${e.choix.map(c => `<button type="button" data-rep="${esc(e.k)}" data-v="${esc(c)}" class="${v.r === c ? "on" : ""}" ${dis}>${esc(c)}</button>`).join("")}</div>`;
+    if (e.mode) h += `<div class="choix petit mode">${["Téléphone", "Rencontre"].map(c => `<button type="button" data-mode="${esc(e.k)}" data-v="${esc(c)}" class="${v.mode === c ? "on" : ""}" ${dis}>${c}</button>`).join("")}</div>`;
     h += `<input type="date" data-sv="${esc(e.k)}" value="${esc(v.v || "")}" aria-label="${esc(e.l)} : date" ${dis || (bloque ? "disabled" : "")}>`;
     if (!fait && !bloque && !e.choix) h += `<button type="button" class="mini" data-auj="${esc(e.k)}" ${dis}>Aujourd'hui</button>`;
     h += `</div>`;
+    if (e.k === "contact") {
+      h += `<div class="groupe"><label>Réponse / suite donnée</label><textarea rows="2" data-sv="reponse" placeholder="Ex. OK pour couper · à rappeler · ne souhaite pas…" ${dis}>${esc((f.reponse || {}).v || "")}</textarea></div>`;
+      h += `<div class="groupe"><label>Date de relance</label><input type="date" data-sv="relance" value="${esc((f.relance || {}).v || "")}" ${dis}></div>`;
+    }
+    if (e.k === "offre") {
+      h += `<div class="groupe deux"><div><label>Volume estimé (m³)</label><input type="number" inputmode="decimal" step="any" data-sv="volume" value="${esc((f.volume || {}).v || "")}" ${dis}></div><div><label>Prix / offre (€)</label><input type="number" inputmode="decimal" step="any" data-sv="prix" value="${esc((f.prix || {}).v || "")}" ${dis}></div></div>`;
+    }
   });
   const cl = f.cloture || {};
   h += `</div><div class="groupe"><label>Clôturer le suivi</label><div class="choix petit">${["Terminé", "Abandonné"].map(c => `<button type="button" data-clot="${c}" class="${cl.v && cl.r === c ? "on" : ""}" ${dis}>${c}</button>`).join("")}</div></div>`;
@@ -1545,24 +1738,77 @@ function majCarteParcelle(d, p) {
   const e = document.getElementById("ent-" + p.idu); if (e) e.innerHTML = htmlEnteteSuivi(p, d);
   const det = document.getElementById("det-" + p.idu); if (det && !det.hidden) det.innerHTML = htmlDetailSuivi(p, d);
 }
+// Reclasse la fiche recap a jour dans le dossier Drive (si le dossier est enregistre).
+async function classerFicheDrive(d) {
+  if (!d.enregistre) return;
+  const fiche = await ficheDossier(d);
+  await dbPut("courriers", fiche);
+  await enfiler({ action: "save_file", source: "courriers", ref: fiche.id, dossierId: d.id, dossierNom: d.nom });
+}
+// Version lisible a l'ecran de la fiche recapitulative (meme contenu que le Word).
+function htmlRecapLisible(d) {
+  const ligne = (a, b) => b ? `<div class="ligne"><span>${esc(a)}</span><span>${esc(b)}</span></div>` : "";
+  const n = comptesTypes(d), surf = d.parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
+  let h = `<div class="recap-tete"><h1>Fiche récapitulative de prospection</h1><div class="recap-sous">${esc(d.nom)}</div></div>`;
+  h += `<div class="chips">${Object.keys(n).map(k => chipType(k) + `<b class="nb">${n[k]}</b>`).join("")}</div>`;
+  h += ligne("N° de prospection", d.code) + ligne("Commune(s)", [...new Set(d.parcelles.map(p => p.commune).filter(Boolean))].join(", ")) + ligne("Lieu-dit", d.donnees.lieu_dit) +
+    ligne("Gestionnaire", d.auteur) + ligne("Créé le", d.cree) + ligne("Parcelles", d.parcelles.length + " · " + ha(surf)) + ligne("Propriétaires", proprietairesDe(d).join(", ") || "—");
+  h += tableauParcelles(d);
+  themesUtiles(d).forEach(t => {
+    if (t.bois && d.parcelles.some(p => p.peuplement)) {
+      h += `<h2>${esc(t.titre)}</h2>`;
+      d.parcelles.filter(p => !sansBois(typeDe(p))).forEach(p => {
+        const src = peuplObj(d, p), nn = natureDe(d, p);
+        const l = t.champs.map(c => ligne(c.l, valeurLisibleDe(src, c.k))).join("");
+        h += `<div class="parcelle" style="border-left:4px solid ${couleurParcelle(d, p).c}"><div class="peupl-ligne"><b>${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</b>${nn ? `<span class="peupl-pastille" style="--c:${couleurParcelle(d, p).c}">${svgPeupl(nn)}${esc(nn)}</span>` : ""}${p.peuplement ? `<span class="badge gris">modifié</span>` : ""}</div>${l}</div>`;
+      });
+    } else {
+      const l = t.champs.map(c => ligne(c.l, valeurLisible(d, c.k))).join("");
+      h += `<h2>${esc(t.titre)}</h2>${l || `<p class="note">Rien de saisi.</p>`}`;
+    }
+  });
+  h += `<h2>Réglementation communale</h2>` + (reglesLisibles(d).map(x => ligne(x[0], x[1])).join("") || `<p class="note">Rien de saisi.</p>`);
+  h += `<h2>Zonage réglementaire</h2>` + htmlZoneDossier(d);
+  return h;
+}
+// Apercu plein ecran de la fiche, avec telechargement, e-mail et impression PDF.
+function apercuRecap(d) {
+  fermerApercuRecap();
+  const o = document.createElement("div"); o.id = "recapP";
+  o.innerHTML = `<div class="cp-barre">
+      <button class="btn" id="rpPrint" type="button">🖨️ Imprimer / PDF</button>
+      <button class="btn btn2" id="rpWord" type="button">📄 Word</button>
+      <button class="btn btn2" id="rpMail" type="button">✉️ E-mail</button>
+      <button class="btn btn2" id="rpClose" type="button">Fermer</button>
+    </div><div class="recap-feuille">${htmlRecapLisible(d)}</div>`;
+  document.body.appendChild(o);
+  $("rpClose").onclick = fermerApercuRecap;
+  $("rpPrint").onclick = () => window.print();
+  $("rpWord").onclick = async () => { telecharger(await ficheDossier(d)); classerFicheDrive(d); };
+  $("rpMail").onclick = async () => { await envoyerParMail(await ficheDossier(d), `Fiche récapitulative ${d.nom}`); classerFicheDrive(d); };
+}
+function fermerApercuRecap() { const o = $("recapP"); if (o) o.remove(); }
 function brancherFiche(d) {
   const c = $("sheetCorps"), parc = idu => d.parcelles.find(x => x.idu === idu);
-  $("fWord").onclick = async () => telecharger(await ficheDossier(d));
-  $("fMail").onclick = async () => envoyerParMail(await ficheDossier(d), `Fiche récapitulative ${d.nom}`);
+  if ($("fApercu")) $("fApercu").onclick = () => apercuRecap(d);
+  $("fWord").onclick = async () => { telecharger(await ficheDossier(d)); classerFicheDrive(d); };
+  $("fMail").onclick = async () => { await envoyerParMail(await ficheDossier(d), `Fiche récapitulative ${d.nom}`); classerFicheDrive(d); };
   if ($("fCarte")) $("fCarte").onclick = () => cartePresentation(d);
   if ($("fRestaurer")) $("fRestaurer").onclick = () => restaurer(d);
   if ($("fArchiver")) $("fArchiver").onclick = () => choisirArchivage(d);
   if ($("fModif")) $("fModif").onclick = () => { vueDossier = "saisie"; outil = "saisie"; document.querySelectorAll("[data-outil]").forEach(x => x.classList.toggle("on", x.dataset.outil === "saisie")); bandeau(null); afficherDossier(); };
+  if ($("fPartage")) $("fPartage").onclick = () => basculerPartage(d);
   c.addEventListener("click", async e => {
     const t = e.target;
     const o = t.closest("[data-ouvrir]");
     if (o) { const det = document.getElementById("det-" + o.dataset.ouvrir); det.hidden = !det.hidden; if (!det.hidden) det.innerHTML = htmlDetailSuivi(parc(o.dataset.ouvrir), d); o.textContent = det.hidden ? "Suivi ▾" : "Suivi ▴"; return; }
     const m = t.closest("[data-mail]"); if (m) { const l = await courrierDe(d, parc(m.dataset.mail)); if (l) envoyerParMail(l, `Courrier ${d.nom} : ${l.destinataire || "propriétaire à compléter"}`); return; }
     const dl = t.closest("[data-dl]"); if (dl) { const l = await courrierDe(d, parc(dl.dataset.dl)); if (l) telecharger(l); return; }
-    const carte = t.closest("[data-carte]"); if (!carte || d.archive) return;
+    const carte = t.closest("[data-carte]"); if (!carte || !peutSuivre(d)) return;
     const p = parc(carte.dataset.carte);
     if (t.dataset.auj) { await majSuivi(d, p, t.dataset.auj, { v: isoJour() }); return; }
-    if (t.dataset.rep) { const cur = suiviDe(p).f[t.dataset.rep] || {}; await majSuivi(d, p, t.dataset.rep, { v: cur.v || isoJour(), r: t.dataset.v }); return; }
+    if (t.dataset.mode) { const cur = suiviDe(p).f[t.dataset.mode] || {}; await majSuivi(d, p, t.dataset.mode, Object.assign({}, cur, { mode: t.dataset.v })); return; }
+    if (t.dataset.rep) { const cur = suiviDe(p).f[t.dataset.rep] || {}; const off = cur.r === t.dataset.v; await majSuivi(d, p, t.dataset.rep, Object.assign({}, cur, { v: cur.v || isoJour(), r: off ? "" : t.dataset.v })); return; }
     if (t.dataset.clot) { const cur = suiviDe(p).f.cloture || {}; const off = cur.v && cur.r === t.dataset.clot; await majSuivi(d, p, "cloture", off ? { v: "" } : { v: isoJour(), r: t.dataset.clot }); return; }
     if (t.dataset.ajnote !== undefined) {
       const ta = carte.querySelector("[data-note]"), txt = ta.value.trim(); if (!txt) return;
@@ -1572,7 +1818,7 @@ function brancherFiche(d) {
     }
   });
   c.addEventListener("change", async e => {
-    const t = e.target, carte = t.closest("[data-carte]"); if (!carte || !t.dataset.sv || d.archive) return;
+    const t = e.target, carte = t.closest("[data-carte]"); if (!carte || !t.dataset.sv || !peutSuivre(d)) return;
     const p = parc(carte.dataset.carte), k = t.dataset.sv, cur = suiviDe(p).f[k] || {};
     await majSuivi(d, p, k, Object.assign({}, cur, { v: t.value }));
   });
@@ -1657,12 +1903,22 @@ function lisibleDossier(d) {
   return o;
 }
 // Courriers par type et par proprietaire, et fiche, envoyes dans Drive.
+// Nom du sous-dossier Drive d'une parcelle.
+function labelParcelleDrive(p) {
+  const s = sansZero(p.section || ""), n = sansZero(p.numero || "");
+  return "Parcelle " + ((s || n) ? (s ? s + " " : "") + n : (p.idu || "")).trim();
+}
 async function fileDocuments(d) {
   const lettres = await genererCourriers(d), fiche = await ficheDossier(d);
   await dbPut("courriers", fiche);
   await dbPut("queue", { action: "save_dossier", data: pourServeur(d), dossierId: d.id });
   await dbPut("queue", { action: "vider_courriers", dossierId: d.id, dossierNom: d.nom });
-  for (const l of lettres) await dbPut("queue", { action: "save_file", source: "courriers", ref: l.id, dossierId: d.id, dossierNom: d.nom, sousDossier: TYPES[l.type].dossier });
+  // Chaque courrier est classe dans le sous-dossier de chaque parcelle qu'il concerne.
+  for (const l of lettres) {
+    const sousDossiers = (l.idus || []).map(idu => { const p = d.parcelles.find(x => x.idu === idu); return p ? labelParcelleDrive(p) : null; }).filter(Boolean);
+    await dbPut("queue", { action: "save_file", source: "courriers", ref: l.id, dossierId: d.id, dossierNom: d.nom, sousDossiers: sousDossiers.length ? sousDossiers : [""] });
+  }
+  // La fiche recap reste a la racine du dossier.
   await dbPut("queue", { action: "save_file", source: "courriers", ref: fiche.id, dossierId: d.id, dossierNom: d.nom });
 }
 async function enregistrerDossier(d) {
@@ -1804,7 +2060,8 @@ async function docxCourrier(d, proprio, parcelles, type) {
 // Un courrier par type de parcelle et par proprietaire, avec toutes ses parcelles.
 async function genererCourriers(d) {
   const groupes = new Map();
-  d.parcelles.filter(p => p.etat === "ok").forEach(p => {
+  // Le sol nu ne genere pas de courrier (ni ordre de mission bois, ni convention de passage).
+  d.parcelles.filter(p => p.etat === "ok" && typeDe(p) !== "SOL_NU").forEach(p => {
     const ps = p.proprietaires.length ? p.proprietaires : [null], t = typeDe(p);
     ps.forEach(o => { const k = t + "|" + (o ? o.nom : ""); if (!groupes.has(k)) groupes.set(k, { o, t, parcelles: [] }); groupes.get(k).parcelles.push(p); });
   });
@@ -1849,7 +2106,7 @@ async function ficheDossier(d) {
     b += wTitre(t.titre);
     if (t.bois && d.parcelles.some(p => p.peuplement)) {
       // Une colonne par parcelle avec bois quand le peuplement varie.
-      const bois = d.parcelles.filter(p => typeDe(p) !== "PASSAGE");
+      const bois = d.parcelles.filter(p => !sansBois(typeDe(p)));
       const entete = ["Donnée"].concat(bois.map(p => sansZero(p.section) + " " + sansZero(p.numero)));
       const lignes = t.champs.map(c => [c.l].concat(bois.map(p => valeurLisibleDe(peuplObj(d, p), c.k) || "—")));
       const l1 = 2400, rest = Math.round((9072 - l1) / bois.length);
@@ -1919,9 +2176,10 @@ function cartePresentation(d) {
   const communes = [...new Set(d.parcelles.map(p => p.commune).filter(Boolean))];
   const surf = d.parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
   // Peuplements et types presents, pour la legende.
-  const presents = []; Object.keys(PEUPL).forEach(n => { if (parcelles.some(p => typeDe(p) !== "PASSAGE" && natureDe(d, p) === n)) presents.push({ nom: n, c: PEUPL[n].c }); });
-  if (parcelles.some(p => typeDe(p) !== "PASSAGE" && !PEUPL[natureDe(d, p)])) presents.push({ nom: "Bois, peuplement non précisé", c: PEUPL_DEFAUT.c });
+  const presents = []; Object.keys(PEUPL).forEach(n => { if (parcelles.some(p => !sansBois(typeDe(p)) && natureDe(d, p) === n)) presents.push({ nom: n, c: PEUPL[n].c }); });
+  if (parcelles.some(p => !sansBois(typeDe(p)) && !PEUPL[natureDe(d, p)])) presents.push({ nom: "Bois, peuplement non précisé", c: PEUPL_DEFAUT.c });
   if (parcelles.some(p => typeDe(p) === "PASSAGE")) presents.push({ nom: "Droit de passage", c: TYPES.PASSAGE.c });
+  if (parcelles.some(p => typeDe(p) === "SOL_NU")) presents.push({ nom: "Sol nu", c: TYPES.SOL_NU.c });
   const petit = parcelles.length <= 30; // sur peu de parcelles, on detaille l'etiquette
   const o = document.createElement("div"); o.id = "carteP"; o.className = "fond-" + cpFond;
   o.innerHTML = `
@@ -1964,7 +2222,7 @@ function cartePresentation(d) {
 }
 function p0(d) { const p = d.parcelles[0]; return p.geom ? L.geoJSON(p.geom).getBounds().getCenter() : L.latLng(p.lat, p.lng); }
 function tableauParcelles(d) {
-  const rows = d.parcelles.map((p, i) => `<tr><td>${i + 1}</td><td>${esc(p.commune || "")} ${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</td><td>${esc(ha(p.contenance || 0))}</td><td>${esc(typeDe(p) === "PASSAGE" ? "Droit de passage" : natureDe(d, p) || "Non précisé")}</td></tr>`).join("");
+  const rows = d.parcelles.map((p, i) => `<tr><td>${i + 1}</td><td>${esc(p.commune || "")} ${esc(sansZero(p.section))} ${esc(sansZero(p.numero))}</td><td>${esc(ha(p.contenance || 0))}</td><td>${esc(sansBois(typeDe(p)) ? TYPES[typeDe(p)].l : natureDe(d, p) || "Non précisé")}</td></tr>`).join("");
   const surf = d.parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
   return `<div class="cp-tableau"><h2>Parcelles prospectées — ${esc([...new Set(d.parcelles.map(p => p.commune).filter(Boolean))].join(", "))}</h2><table><thead><tr><th>N°</th><th>Parcelle</th><th>Surface</th><th>Peuplement</th></tr></thead><tbody>${rows}<tr class="cp-total"><td></td><td><b>Total</b></td><td><b>${esc(ha(surf))}</b></td><td><b>${d.parcelles.length} parcelles</b></td></tr></tbody></table></div>`;
 }
