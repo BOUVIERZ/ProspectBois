@@ -134,7 +134,7 @@ async function apiGet(q) {
     return JSON.parse(await r.text());
   } catch (e) { return null; }
 }
-function pastille(c) { $("pastille").className = "pastille " + c; }
+function pastille(c) { $("pastille").className = "pastille " + c; if (typeof majBanniere === "function") majBanniere(); }
 
 // ---- File d'envoi : rien n'en sort sans confirmation du serveur
 let envoiEnCours = false;
@@ -176,6 +176,39 @@ async function vider() {
     }
   } finally { envoiEnCours = false; }
 }
+// ---- Protection des donnees : banniere, sauvegarde fichier, garde-fous ----
+let attenteCache = 0;
+// Nombre de dossiers distincts encore en attente d'envoi (plus parlant que le nombre d'operations).
+async function dossiersEnAttente() {
+  const q = await dbAll("queue").catch(() => []);
+  const ids = new Set();
+  q.forEach(o => { const id = (o.data && o.data.id) || o.dossierId || o.id; if (id && /dossier|file|suivi|archiver/.test(o.action || "")) ids.add(id); });
+  return { dossiers: ids.size, ops: q.length };
+}
+async function majBanniere() {
+  const { dossiers: nd, ops } = await dossiersEnAttente();
+  attenteCache = ops;
+  const b = $("banAttente"); if (!b) return;
+  if (ops > 0 && user) {
+    const n = nd || ops;
+    $("banNb").textContent = n;
+    $("banLib").textContent = (nd ? "dossier" : "envoi") + (n > 1 ? "s" : "");
+    b.hidden = false;
+  } else b.hidden = true;
+}
+// Copie locale de toutes les donnees dans un fichier, pour ne jamais rien perdre.
+async function exporterSauvegarde() {
+  const ds = await dbAll("dossiers"), an = await dbAll("annots"), q = await dbAll("queue");
+  const data = { app: "ProspectBois", version: "pb8", exporte: new Date().toISOString(), utilisateur: user ? user.nom : "", dossiers: ds, annots: an, en_attente: q.length };
+  const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+  const nom = "ProspectBois_sauvegarde_" + new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-") + ".json";
+  telecharger({ blob, nom });
+  toast(ds.length + " dossier(s) sauvegardé(s) dans " + nom);
+}
+// Avertit avant de quitter s'il reste des donnees non envoyees.
+window.addEventListener("beforeunload", e => { if (attenteCache > 0) { e.preventDefault(); e.returnValue = ""; return ""; } });
+// Renvoi automatique regulier tant qu'il reste des donnees en attente.
+setInterval(() => { if (navigator.onLine && user) nbAttente().then(n => { if (n) vider().then(majBanniere); else majBanniere(); }); }, 25000);
 let synchroEnCours = null;
 function synchroniser() {
   if (!synchroEnCours) synchroEnCours = faireSynchro().finally(() => { synchroEnCours = null; });
@@ -260,8 +293,10 @@ $("lOk").onclick = async function () {
 
 async function deconnexion() {
   const n = await nbAttente();
-  if (n && !confirm(n + " envoi(s) en attente seront perdus sur cet appareil. Se déconnecter quand même ?")) return;
-  if (!n && !confirm("Se déconnecter ?")) return;
+  if (n) {
+    if (confirm(n + " enregistrement(s) ne sont PAS encore envoyés au serveur et seront perdus si vous vous déconnectez.\n\nVoulez-vous d'abord en télécharger une copie de sauvegarde ?")) { await exporterSauvegarde(); return; }
+    if (!confirm("Se déconnecter quand même et perdre ces " + n + " enregistrement(s) ?")) return;
+  } else if (!confirm("Se déconnecter ?")) return;
   for (const s of ["dossiers", "annots", "photos", "courriers", "queue"]) await tx(s, "readwrite", x => x.clear());
   lss("pb5_user", null); user = null; dossiers = []; annots = [];
   dessinerProspections(); dessinerAnnots(); verrouiller(); fermerSheet();
@@ -273,6 +308,7 @@ async function demarrer() {
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   dossiers = await dbAll("dossiers"); annots = await dbAll("annots");
   initCarte(); dessinerProspections(); dessinerAnnots();
+  majBanniere();
   synchroniser();
 }
 
@@ -1980,6 +2016,8 @@ $("sheetFermer").onclick = () => {
 };
 $("btnCouches").onclick = panneauCouches;
 $("btnRecherche").onclick = panneauRecherche;
+$("banEnvoi").onclick = () => { toast("Envoi en cours…"); synchroniser().then(majBanniere); };
+$("banSave").onclick = exporterSauvegarde;
 // ---- Dossiers prospection ------------------------------------
 let filtreDossiers = "tous", rechercheDossiers = "";
 const sansAccent = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
@@ -2012,9 +2050,10 @@ function rendreListe() {
 $("btnDossiers").onclick = listeDossiers;
 $("btnCompte").onclick = async () => {
   const n = await nbAttente();
-  ouvrirSheet(user.nom, `<div class="ligne"><span>Identifiant</span><span>${esc(user.id)}</span></div><div class="ligne"><span>En attente d'envoi</span><span>${n}</span></div><h3>Coordonnées reprises dans les courriers</h3><label for="cEmail">E-mail</label><input id="cEmail" type="email" value="${esc(user.email || "")}"><label for="cTel" style="margin-top:10px">Téléphone</label><input id="cTel" type="tel" value="${esc(user.tel || "")}"><button class="btn btn2" id="cProfil">Enregistrer mes coordonnées</button><h3>Suivi</h3><div class="ligne"><span>Rappel par e-mail après</span><span>${delaiRappel()} jours sans action</span></div><p class="note">Délai commun à l'équipe, modifiable dans l'onglet « Reglages » du Google Sheets.</p><h3>Application</h3><button class="btn btn2" id="cSync">🔄 Synchroniser</button>${user.sheetUrl ? `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(user.sheetUrl)}" target="_blank" rel="noopener">Ouvrir le Google Sheets</a>` : ""}<button class="btn danger" id="cDeco">Se déconnecter</button>`);
+  ouvrirSheet(user.nom, `<div class="ligne"><span>Identifiant</span><span>${esc(user.id)}</span></div><div class="ligne"><span>En attente d'envoi</span><span>${n}</span></div><h3>Coordonnées reprises dans les courriers</h3><label for="cEmail">E-mail</label><input id="cEmail" type="email" value="${esc(user.email || "")}"><label for="cTel" style="margin-top:10px">Téléphone</label><input id="cTel" type="tel" value="${esc(user.tel || "")}"><button class="btn btn2" id="cProfil">Enregistrer mes coordonnées</button><h3>Suivi</h3><div class="ligne"><span>Rappel par e-mail après</span><span>${delaiRappel()} jours sans action</span></div><p class="note">Délai commun à l'équipe, modifiable dans l'onglet « Reglages » du Google Sheets.</p><h3>Application</h3>${n ? `<div class="alerte">⚠️ ${n} enregistrement(s) pas encore envoyé(s). Restez sur le réseau et ne supprimez pas l'appli tant que ce n'est pas à zéro.</div>` : ""}<button class="btn btn2" id="cSync">🔄 Synchroniser</button><button class="btn btn2" id="cSauve">💾 Sauvegarder mes données (fichier)</button><p class="note">La sauvegarde télécharge une copie de tous tes dossiers. À faire avant toute mise à jour ou réinstallation, par sécurité.</p>${user.sheetUrl ? `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(user.sheetUrl)}" target="_blank" rel="noopener">Ouvrir le Google Sheets</a>` : ""}<button class="btn danger" id="cDeco">Se déconnecter</button>`);
   $("cSync").onclick = async () => { await synchroniser(); toast("Synchronisation terminée"); };
   $("cDeco").onclick = deconnexion;
+  $("cSauve").onclick = exporterSauvegarde;
   $("cProfil").onclick = async () => {
     const email = $("cEmail").value.trim(), tel = $("cTel").value.trim();
     const r = await apiPost({ action: "update_profil", email, tel });
