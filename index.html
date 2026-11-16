@@ -26,6 +26,7 @@
   <button class="rond" id="btnRecherche" aria-label="Rechercher une parcelle ou un lieu" title="Rechercher">🔍</button>
   <button class="rond" id="btnGps" aria-label="Ma position" title="Ma position">📍</button>
   <button class="rond" id="btnDossiers" aria-label="Dossiers prospection" title="Dossiers prospection">📁</button>
+  <button class="rond" id="btnAgenda" aria-label="Tâches et agenda" title="Tâches et agenda">📅<span id="pastAgenda" class="pastille"></span></button>
   <button class="rond" id="btnCompte" aria-label="Compte" title="Compte">👤<span id="pastille" class="pastille"></span></button>
 </div>
 <div id="bandeau" class="bandeau" hidden></div>
@@ -70,8 +71,11 @@
 </div>
 <div id="toast" class="toast"></div>
 <input type="file" id="fichierPhoto" accept="image/*" capture="environment" multiple hidden>
+<input type="file" id="fichierGpx" accept=".gpx,application/gpx+xml,text/xml" hidden>
+<input type="file" id="fichierDoc" accept="image/*,application/pdf" capture="environment" hidden>
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/jszip.min.js"></script>
+<script src="vendor/html2canvas.min.js"></script>
 <script src="config.js"></script>
 <script src="app.js"></script>
 </body></html>
