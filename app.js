@@ -440,10 +440,10 @@ CATALOGUE.forEach(c => {
 const DEF_COUCHE = id => CATALOGUE.find(c => c.id === id) || FONDS.find(c => c.id === id);
 
 function wmts(layer, style, fmt, set, opts, base) {
-  return L.tileLayer((base || GEOPF + "/wmts?") + "SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=" + layer + "&STYLE=" + encodeURIComponent(style) + "&TILEMATRIXSET=" + set + "&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=" + fmt, Object.assign({ maxZoom: 20, attribution: "IGN-F/Géoplateforme" }, opts));
+  return L.tileLayer((base || GEOPF + "/wmts?") + "SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=" + layer + "&STYLE=" + encodeURIComponent(style) + "&TILEMATRIXSET=" + set + "&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=" + fmt, Object.assign({ maxZoom: 22, attribution: "IGN-F/Géoplateforme" }, opts));
 }
 function gpu(layers, filtre) {
-  const o = { layers, format: "image/png", transparent: true, version: "1.3.0", maxZoom: 20, attribution: "Géoportail de l'Urbanisme" };
+  const o = { layers, format: "image/png", transparent: true, version: "1.3.0", maxZoom: 22, maxNativeZoom: 20, attribution: "Géoportail de l'Urbanisme" };
   if (filtre) o.CQL_FILTER = filtre;
   return L.tileLayer.wms(GEOPF + "/wms-v/ows", o);
 }
@@ -473,7 +473,7 @@ function coucheLeaflet(c, fond) {
       c.l.on("tileerror", () => {
         if (bascule || !navigator.onLine) return; bascule = true;
         const actif = map.hasLayer(c.l); if (actif) map.removeLayer(c.l);
-        c.l = L.tileLayer.wms(GEOPF + "/wms-r/wms", { layers: "CADASTRALPARCELS.PARCELLAIRE_EXPRESS", format: "image/png", transparent: true, version: "1.3.0", maxZoom: 20 });
+        c.l = L.tileLayer.wms(GEOPF + "/wms-r/wms", { layers: "CADASTRALPARCELS.PARCELLAIRE_EXPRESS", format: "image/png", transparent: true, version: "1.3.0", maxZoom: 22, maxNativeZoom: 20 });
         appliquerCouches();
       });
     }
@@ -525,7 +525,7 @@ let gProspections, gAnnots, gTemp, gSel, gInitiales, gExclues, carteOk = false;
 function initCarte() {
   if (carteOk) return; carteOk = true;
   const v = ls("pb5_vue", null);
-  map = L.map("map", { zoomControl: false, attributionControl: true, doubleClickZoom: true, tap: false, maxZoom: 20 }).setView(v ? v.c : CFG.centre, v ? v.z : CFG.zoom);
+  map = L.map("map", { zoomControl: false, attributionControl: true, doubleClickZoom: true, tap: false, maxZoom: 22 }).setView(v ? v.c : CFG.centre, v ? v.z : CFG.zoom);
   map.attributionControl.setPrefix("");
   gProspections = L.featureGroup(); gInitiales = L.featureGroup().addTo(gProspections);
   gAnnots = L.featureGroup().addTo(map); gTemp = L.featureGroup().addTo(map); gSel = L.featureGroup().addTo(map);
@@ -777,29 +777,146 @@ function initRechLieu() {
 }
 
 // ---- GPS ------------------------------------------------------
-let gpsPoint, gpsCercle, ecouteursGps = [];
+let gpsPoint, gpsCercle, gpsPrec = null, ecouteursGps = [], collecteMoyen = null;
+const classePrec = m => m == null ? "" : m <= 5 ? "ok" : m <= 12 ? "moy" : "bof";
+function majGpsPrec() {
+  const el = $("gpsPrec"); if (!el) return;
+  if (gpsPrec == null || gpsWatch === null) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = "📍 ±" + (gpsPrec < 10 ? gpsPrec.toFixed(1) : Math.round(gpsPrec)) + " m";
+  el.className = "gpsprec " + classePrec(gpsPrec);
+}
 function demarrerGps(centrer) {
   if (!navigator.geolocation) { toast("GPS indisponible sur cet appareil", 1); return; }
   if (gpsWatch !== null) { if (centrer && gpsPos) map.setView(gpsPos, Math.max(map.getZoom(), 16)); return; }
   let premier = centrer;
   gpsWatch = navigator.geolocation.watchPosition(p => {
-    gpsPos = L.latLng(p.coords.latitude, p.coords.longitude);
+    gpsPos = L.latLng(p.coords.latitude, p.coords.longitude); gpsPrec = p.coords.accuracy;
     if (!gpsPoint) {
-      gpsCercle = L.circle(gpsPos, { radius: p.coords.accuracy, color: "#2f8cff", weight: 1, fillOpacity: .12, interactive: false }).addTo(map);
+      gpsCercle = L.circle(gpsPos, { radius: gpsPrec, color: "#2f8cff", weight: 1, fillOpacity: .12, interactive: false }).addTo(map);
       gpsPoint = L.circleMarker(gpsPos, { radius: 8, color: "#fff", weight: 3, fillColor: "#2f8cff", fillOpacity: 1, interactive: false }).addTo(map);
-    } else { gpsPoint.setLatLng(gpsPos); gpsCercle.setLatLng(gpsPos).setRadius(p.coords.accuracy); }
+    } else { gpsPoint.setLatLng(gpsPos); gpsCercle.setLatLng(gpsPos).setRadius(gpsPrec); }
+    majGpsPrec();
     if (premier || gpsSuit) { map.setView(gpsPos, premier ? Math.max(map.getZoom(), 16) : map.getZoom()); premier = false; }
-    ecouteursGps.forEach(f => f(gpsPos, p.coords.accuracy));
+    ecouteursGps.forEach(f => f(gpsPos, gpsPrec));
   }, e => {
     // Un signal perdu en foret ne coupe pas le suivi : seul un refus l'arrete.
     if (e.code === 1) {
       toast("Autorisez la localisation pour voir votre position", 1);
-      navigator.geolocation.clearWatch(gpsWatch); gpsWatch = null;
+      navigator.geolocation.clearWatch(gpsWatch); gpsWatch = null; majGpsPrec();
     }
-  }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 });
+  }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+}
+// Point moyen : moyenne pondered de plusieurs mesures GPS en restant immobile (pour viser une borne).
+function moyennePts(pts) {
+  let sw = 0, la = 0, ln = 0, sa = 0;
+  pts.forEach(p => { sw += p.w; la += p.lat * p.w; ln += p.lng * p.w; sa += p.acc; });
+  const lat = la / sw, lng = ln / sw;
+  let d2 = 0; pts.forEach(p => { const dx = (p.lng - lng) * 111320 * Math.cos(lat * Math.PI / 180), dy = (p.lat - lat) * 111320; d2 += dx * dx + dy * dy; });
+  const ec = pts.length > 1 ? Math.sqrt(d2 / pts.length) : sa / pts.length;
+  const prec = Math.max(0.3, Math.min(ec, (sa / pts.length) / Math.sqrt(pts.length)));
+  return { lat, lng, prec, n: pts.length };
+}
+function majPointMoyen() {
+  const c = collecteMoyen; if (!c) return;
+  const m = c.cur;
+  bandeau(m ? `Point moyen : <b>${m.n} mesure(s)</b> · précision ≈ <b>±${m.prec.toFixed(1)} m</b>. Restez immobile.` : "Acquisition… restez immobile, bras tendu vers le ciel dégagé.", [["Enregistrer le point", finirPointMoyen], ["Annuler", annulerPointMoyen]]);
+}
+function demarrerPointMoyen() {
+  if (collecteMoyen) return;
+  demarrerGps(false);
+  collecteMoyen = { pts: [], halo: L.circleMarker(gpsPos || map.getCenter(), { radius: 6, color: "#111", weight: 2, fillColor: "#ffe14d", fillOpacity: 1, interactive: false }).addTo(gTemp) };
+  collecteMoyen.ecoute = (p, prec) => {
+    const c = collecteMoyen; if (!c || prec > 30) return;
+    c.pts.push({ lat: p.lat, lng: p.lng, w: 1 / (prec * prec), acc: prec });
+    c.cur = moyennePts(c.pts); c.halo.setLatLng([c.cur.lat, c.cur.lng]); majPointMoyen();
+  };
+  ecouteursGps.push(collecteMoyen.ecoute);
+  majPointMoyen();
+}
+async function finirPointMoyen() {
+  const c = collecteMoyen; if (!c || !c.cur) { toast("Pas encore assez de mesures, patientez quelques secondes", 1); return; }
+  const m = c.cur; annulerPointMoyen();
+  const nom = prompt("Nom du repère (point moyen)", "Borne " + new Date().toLocaleDateString("fr-FR"));
+  if (nom === null) return;
+  await ajouterAnnot("repere", nom, [[+m.lat.toFixed(7), +m.lng.toFixed(7)]], `moyenne de ${m.n} mesures · ±${m.prec.toFixed(1)} m`);
+}
+function annulerPointMoyen() {
+  const c = collecteMoyen; if (!c) return;
+  ecouteursGps = ecouteursGps.filter(f => f !== c.ecoute);
+  if (c.halo) gTemp.removeLayer(c.halo);
+  collecteMoyen = null;
 }
 function majGpsBtn() { $("btnGps").classList.toggle("on", gpsSuit); }
 $("btnGps").onclick = () => { gpsSuit = !gpsSuit; majGpsBtn(); demarrerGps(true); if (gpsSuit && gpsPos) map.setView(gpsPos, Math.max(map.getZoom(), 16)); };
+
+// ---- Guidage vers une borne (distance + direction en direct) ----
+let guideActif = null, attenteCible = false, capAppareil = null, orientListener = null;
+function cap(a, b) {
+  const r = Math.PI / 180, φ1 = a.lat * r, φ2 = b.lat * r, Δλ = (b.lng - a.lng) * r;
+  const y = Math.sin(Δλ) * Math.cos(φ2), x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+const CARDINAUX = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
+const cardinal = d => CARDINAUX[Math.round(d / 45) % 8];
+function demarrerBoussole() {
+  if (orientListener) return;
+  const h = e => { let c = (typeof e.webkitCompassHeading === "number") ? e.webkitCompassHeading : (e.absolute && typeof e.alpha === "number") ? (360 - e.alpha) : null; if (c != null) { capAppareil = c; majGuidage(); } };
+  try {
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      DeviceOrientationEvent.requestPermission().then(res => { if (res === "granted") { orientListener = h; addEventListener("deviceorientation", h, true); } }).catch(() => {});
+    } else if (typeof DeviceOrientationEvent !== "undefined") {
+      orientListener = h; addEventListener("deviceorientationabsolute", h, true); addEventListener("deviceorientation", h, true);
+    }
+  } catch (e) {}
+}
+function arreterBoussole() {
+  if (orientListener) { removeEventListener("deviceorientation", orientListener, true); removeEventListener("deviceorientationabsolute", orientListener, true); orientListener = null; }
+  capAppareil = null;
+}
+function choisirCibleGuidage() {
+  demarrerGps(false); demarrerBoussole();
+  const reps = annots.filter(a => a.type === "repere");
+  const liste = (gpsPos ? reps.map(a => ({ a, d: gpsPos.distanceTo(L.latLng(a.pts[0][0], a.pts[0][1])) })).sort((x, y) => x.d - y.d) : reps.map(a => ({ a, d: null })));
+  const corps = `<p class="note">Choisissez la borne à rejoindre, ou touchez la carte pour viser un point libre.</p>`
+    + (reps.length ? liste.map(({ a, d }) => `<button class="btn btn2" data-cible="${esc(a.id)}" style="text-align:left;margin-bottom:6px">📌 ${esc(a.nom)}${d != null ? ` · <b>${fmtLong(d)}</b>` : ""}</button>`).join("")
+      : `<p class="note">Aucune borne enregistrée pour l'instant. Touchez la carte pour viser un point, ou marquez d'abord une borne avec le point moyen.</p>`);
+  ouvrirSheet("Me guider vers une borne", corps);
+  $("sheetCorps").querySelectorAll("[data-cible]").forEach(b => b.onclick = () => { const a = annots.find(x => x.id === b.dataset.cible); lancerGuidage(L.latLng(a.pts[0][0], a.pts[0][1]), a.nom); });
+  attenteCible = true;
+  bandeau("Touchez une borne dans la liste, ou touchez la carte pour viser un point.");
+}
+function definirCibleGuidage(ll) { lancerGuidage(ll, "Point visé"); }
+function lancerGuidage(cible, nom) {
+  arreterGuidage(true); fermerSheet(); bandeau(null); attenteCible = false;
+  const marq = L.marker(cible, { icon: L.divIcon({ className: "cible-borne", html: "🎯", iconSize: [30, 30], iconAnchor: [15, 15] }), interactive: false }).addTo(gTemp);
+  const ligne = L.polyline([gpsPos || cible, cible], { color: "#ffe14d", weight: 3, dashArray: "8 6", interactive: false }).addTo(gTemp);
+  guideActif = { cible, nom, marq, ligne, ecoute: () => majGuidage() };
+  ecouteursGps.push(guideActif.ecoute);
+  $("guidage").hidden = false;
+  $("gFin").onclick = () => { arreterGuidage(); choisirOutil("info"); };
+  majGuidage();
+}
+function majGuidage() {
+  const g = guideActif; if (!g) return;
+  if (gpsPos) g.ligne.setLatLngs([gpsPos, g.cible]);
+  const d = gpsPos ? gpsPos.distanceTo(g.cible) : null, brg = gpsPos ? cap(gpsPos, g.cible) : 0;
+  $("gNom").textContent = g.nom;
+  $("gDist").textContent = d == null ? "—" : (d < 1000 ? (d < 10 ? d.toFixed(1) : Math.round(d)) + " m" : fmtLong(d));
+  $("gCap").textContent = gpsPos ? `cap ${cardinal(brg)} (${Math.round(brg)}°)${gpsPrec != null ? ` · GPS ±${Math.round(gpsPrec)} m` : ""}` : "position en attente…";
+  $("gFleche").style.transform = `rotate(${brg - (capAppareil != null ? capAppareil : 0)}deg)`;
+  const proche = d != null && d <= 3;
+  $("guidage").classList.toggle("proche", proche);
+  if (proche && !g.vibre) { g.vibre = true; if (navigator.vibrate) navigator.vibrate([120, 60, 120]); }
+  if (d != null && d > 6) g.vibre = false;
+}
+function arreterGuidage(silencieux) {
+  const g = guideActif;
+  if (g) { ecouteursGps = ecouteursGps.filter(f => f !== g.ecoute); if (g.marq) gTemp.removeLayer(g.marq); if (g.ligne) gTemp.removeLayer(g.ligne); }
+  guideActif = null; attenteCible = false;
+  const el = $("guidage"); if (el) el.hidden = true;
+  if (!silencieux) arreterBoussole();
+}
 
 // ---- Cadenas et outils ----------------------------------------
 function verrouiller() {
@@ -826,6 +943,7 @@ function bandeau(txt, boutons) {
 }
 function choisirOutil(o) {
   if (outil === "trace" && traceActive && o !== "trace") { toast("Arrêtez d'abord la trace en cours", 1); return; }
+  annulerPointMoyen(); arreterGuidage();
   outil = o; gTemp.clearLayers(); ptsDessin = []; enAjout = false; bandeau(null);
   document.querySelectorAll("[data-outil]").forEach(b => b.classList.toggle("on", b.dataset.outil === o));
   if (o !== "info" && o !== "saisie") gSel.clearLayers();
@@ -834,6 +952,7 @@ function choisirOutil(o) {
   if (o === "mesure") { fermerSheet(); majMesure(); }
   if (o === "polygone") { fermerSheet(); majPolygone(); }
   if (o === "repere") { fermerSheet(); outilRepere(); }
+  if (o === "precision") { outilPrecision(); }
   if (o === "trace") { fermerSheet(); majTrace(); }
   if (o === "info") bandeau("Touchez une parcelle pour voir ses informations.");
   if (o === "exclure") { fermerSheet(); bandeau("Touchez une parcelle à exclure (à ne pas prospecter)."); }
@@ -845,6 +964,7 @@ function clicCarte(ll) {
   else if (outil === "mesure") { ptsDessin.push(ll); majMesure(); }
   else if (outil === "polygone") { ptsDessin.push(ll); majPolygone(); }
   else if (outil === "exclure") exclureParcelle(ll);
+  else if (outil === "precision" && attenteCible) definirCibleGuidage(ll);
   else if (outil === "saisie") choixParcelleSaisie(ll);
 }
 
@@ -886,10 +1006,19 @@ async function outilRepere() {
     if (!gpsPos) { toast("Position GPS pas encore connue", 1); return; }
     const nom = prompt("Nom du repère", "Repère " + new Date().toLocaleDateString("fr-FR"));
     if (nom === null) return;
-    await ajouterAnnot("repere", nom, [[+gpsPos.lat.toFixed(6), +gpsPos.lng.toFixed(6)]], "");
+    await ajouterAnnot("repere", nom, [[+gpsPos.lat.toFixed(6), +gpsPos.lng.toFixed(6)]], gpsPrec != null ? "±" + Math.round(gpsPrec) + " m" : "");
   };
   demarrerGps(false);
-  bandeau("Repère à votre position GPS.", [["Poser le repère ici", finir]]);
+  bandeau("Repère rapide à votre position. Pour une borne précise, utilisez l'outil <b>🎯 Précision</b>.", [["Poser ici", finir]]);
+}
+// ---- Outil Précision : point moyen (marquer une borne) + guidage (retrouver une borne) ----
+function outilPrecision() {
+  demarrerGps(false);
+  ouvrirSheet("Précision & bornes", `<p class="note">Votre position reste toujours affichée sur la carte. Ici, les outils précis pour la délimitation.</p>`
+    + `<button class="btn btn2" id="pMoyen" style="text-align:left">📍 Marquer une borne — <b>point moyen</b><br><small>Restez immobile : l'appli moyenne plusieurs mesures pour un point plus sûr.</small></button>`
+    + `<button class="btn btn2" id="pGuide" style="text-align:left;margin-top:8px">🧭 Me guider vers une borne<br><small>Choisissez une borne enregistrée : distance et direction en direct.</small></button>`);
+  $("pMoyen").onclick = () => { fermerSheet(); demarrerPointMoyen(); };
+  $("pGuide").onclick = () => choisirCibleGuidage();
 }
 let traceActive = null, verrouEcran = null;
 function majTrace() {
