@@ -245,6 +245,16 @@ async function faireSynchro() {
   if (res.archivees) lss("pb5_archivees", res.archivees);
   const locaux = dossiers.filter(d => bloques.has(d.id) || d.brouillon);
   const fusion = res.dossiers.filter(d => !bloques.has(d.id) && !supprimes.has(d.id) && !locaux.find(l => l.id === d.id)).concat(locaux);
+  // Securite : si le serveur renvoie une parcelle sans peuplement alors qu'on l'a en local, on garde le local.
+  fusion.forEach(d => {
+    const loc = dossiers.find(l => l.id === d.id);
+    if (!loc || loc === d) return;
+    (d.parcelles || []).forEach(p => {
+      if (p.peuplement) return;
+      const lp = (loc.parcelles || []).find(x => x.idu === p.idu);
+      if (lp && lp.peuplement) p.peuplement = lp.peuplement;
+    });
+  });
   for (const d of dossiers) if (!fusion.find(x => x.id === d.id)) await dbDel("dossiers", d.id);
   for (const d of fusion) await dbPut("dossiers", d);
   // Suivi pas encore envoye : rejoue sur la version du serveur.
