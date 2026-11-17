@@ -1222,9 +1222,12 @@ function monContact() { return { nom: user.nom, email: user.email || "", tel: us
 const typeDe = p => TYPES[p.type] ? p.type : "BOIS";
 const aDuBois = d => d.parcelles.some(p => !sansBois(typeDe(p)));
 function nomDossier(d) {
+  if (estImport(d)) return "IMPORT-" + (d.commune ? slug(d.commune) : "PARCELLES") + "-" + d.code;
   const base = (d.commune ? slug(d.commune) : "A-IDENTIFIER") + "-" + d.code, ld = slug(d.donnees.lieu_dit || "");
   return ld ? base + "-" + ld : base;
 }
+// Un dossier issu d'un import de polygones (le drapeau survit a la synchro via donnees._import).
+const estImport = d => !!(d && (d.importe || (d.donnees && d.donnees._import)));
 let typeCourant = ls("pb5_type", "BOIS"), peuplementCourant = ls("pb5_peupl", "");
 function nouveauDossier(p) {
   const d = {
@@ -1919,6 +1922,105 @@ async function importerGpx(file) {
   toast(n ? `${n} élément(s) GPX importé(s)` : "Aucun point ou trace dans ce GPX", n ? 0 : 1);
 }
 
+// ---- Import de polygones (KML/KMZ, GeoJSON, Shapefile .zip, GPX) → dossier « IMPORT » ----
+// Chaque polygone est rattache au cadastre pour recuperer section / numero / zonage.
+const fermerAnneau = r => (r.length && (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1])) ? r.concat([r[0]]) : r;
+function polysDeGeom(g, nom, out) {
+  if (!g) return;
+  const push = coords => { const r = fermerAnneau(coords.map(c => [+c[0], +c[1]]).filter(p => isFinite(p[0]) && isFinite(p[1]))); if (r.length >= 4) out.push({ nom, ring: r }); };
+  if (g.type === "Polygon") push(g.coordinates[0] || []);
+  else if (g.type === "MultiPolygon") (g.coordinates || []).forEach(pl => push(pl[0] || []));
+  else if (g.type === "GeometryCollection") (g.geometries || []).forEach(x => polysDeGeom(x, nom, out));
+}
+function polysDeGeoJSON(gj) {
+  const out = [];
+  const feats = gj.type === "FeatureCollection" ? (gj.features || []) : gj.type === "Feature" ? [gj] : gj.type ? [{ geometry: gj, properties: {} }] : [];
+  feats.forEach(f => { const pr = f.properties || {}; const nom = pr.nom || pr.name || pr.NOM || pr.libelle || pr.Name || ""; polysDeGeom(f.geometry, nom, out); });
+  return out;
+}
+function polysDeKml(txt) {
+  const doc = new DOMParser().parseFromString(txt, "application/xml"), out = [];
+  [...doc.getElementsByTagName("Placemark")].forEach(pm => {
+    const nom = ((pm.getElementsByTagName("name")[0] || {}).textContent || "").trim();
+    [...pm.getElementsByTagName("Polygon")].forEach(pg => {
+      const ob = pg.getElementsByTagName("outerBoundaryIs")[0] || pg;
+      const co = (ob.getElementsByTagName("coordinates")[0] || {}).textContent || "";
+      const ring = co.trim().split(/\s+/).map(s => s.split(",").map(Number)).filter(c => isFinite(c[0]) && isFinite(c[1])).map(c => [c[0], c[1]]);
+      if (ring.length >= 3) out.push({ nom, ring: fermerAnneau(ring) });
+    });
+  });
+  return out;
+}
+function polysDeGpx(txt) {
+  const doc = new DOMParser().parseFromString(txt, "application/xml"), out = [];
+  [...doc.getElementsByTagName("trk"), ...doc.getElementsByTagName("rte")].forEach(t => {
+    const nom = ((t.getElementsByTagName("name")[0] || {}).textContent || "").trim();
+    const pts = [...t.getElementsByTagName("trkpt"), ...t.getElementsByTagName("rtept")].map(p => [+p.getAttribute("lon"), +p.getAttribute("lat")]).filter(c => isFinite(c[0]) && isFinite(c[1]));
+    if (pts.length >= 3) out.push({ nom, ring: fermerAnneau(pts) }); // trace fermee = zone
+  });
+  return out;
+}
+async function lirePolygones(file) {
+  const nom = file.name.toLowerCase();
+  if (nom.endsWith(".geojson") || nom.endsWith(".json")) return polysDeGeoJSON(JSON.parse(await file.text()));
+  if (nom.endsWith(".kml")) return polysDeKml(await file.text());
+  if (nom.endsWith(".gpx")) return polysDeGpx(await file.text());
+  if (nom.endsWith(".kmz")) {
+    const z = await JSZip.loadAsync(await file.arrayBuffer());
+    const k = Object.keys(z.files).find(n => n.toLowerCase().endsWith(".kml"));
+    return k ? polysDeKml(await z.files[k].async("string")) : [];
+  }
+  if (nom.endsWith(".zip")) {
+    if (typeof shp !== "function") throw new Error("Shapefile non supporté ici");
+    const gj = await shp(await file.arrayBuffer()), cols = Array.isArray(gj) ? gj : [gj], out = [];
+    cols.forEach(c => polysDeGeoJSON(c).forEach(x => out.push(x)));
+    return out;
+  }
+  throw new Error("Format non reconnu");
+}
+const centreAnneau = ring => { let x = 0, y = 0; ring.forEach(c => { x += c[0]; y += c[1]; }); return { lng: x / ring.length, lat: y / ring.length }; };
+const reduireAnneau = (ring, max) => { if (ring.length <= max) return ring; const pas = Math.ceil(ring.length / (max - 1)), r = ring.filter((_, i) => i % pas === 0); if (r[r.length - 1] !== ring[ring.length - 1]) r.push(ring[ring.length - 1]); return r; };
+// Parcelles cadastrales sous un polygone importe. Si le cadastre est injoignable, on garde le polygone tel quel.
+async function parcellesDePolygone(poly) {
+  const geom = { type: "Polygon", coordinates: [reduireAnneau(poly.ring, 50)] };
+  let feats = [];
+  try { feats = (await getJson2(`${APICARTO}/cadastre/parcelle?source_ign=PCI&geom=${geomParam(geom)}`)).features || []; } catch (e) { feats = []; }
+  if (feats.length) return feats.map(f => { const outer = (anneaux(f.geometry)[0] || [])[0] || poly.ring; return depuisFeature(f, centreAnneau(outer)); });
+  const c = centreAnneau(poly.ring);
+  return [{ idu: "IMPORT-" + uuid().slice(0, 8), insee: "", commune: poly.nom || "", prefixe: "000", section: "", numero: "", feuille: "", echelle: "", arrondissement: "", contenance: 0, lat: +c.lat.toFixed(6), lng: +c.lng.toFixed(6), geom: simplifier(geom), proprietaires: [], proprioEtat: "attente", zonage: [], zonageManquants: null, etat: "ok", importLibre: true }];
+}
+function demanderImportPoly() { $("fichierPoly").click(); }
+async function importerPolygones(file) {
+  let polys;
+  try { polys = await lirePolygones(file); }
+  catch (e) { toast("Fichier illisible : " + (e.message || e), 1); return; }
+  if (!polys.length) { toast("Aucun polygone trouvé dans ce fichier", 1); return; }
+  if (!navigator.onLine) { toast("Pas de réseau : connexion requise pour le rattachement cadastre", 1); return; }
+  toast(`Import : ${polys.length} polygone(s), rattachement au cadastre…`);
+  const parcelles = [], vus = new Set();
+  for (let i = 0; i < polys.length; i++) {
+    let lot = [];
+    try { lot = await parcellesDePolygone(polys[i]); } catch (e) { lot = []; }
+    lot.forEach(p => { if (!vus.has(p.idu)) { vus.add(p.idu); p.type = "BOIS"; p.ajoute = isoJour(); parcelles.push(p); } });
+    toast(`Import : ${i + 1}/${polys.length} · ${parcelles.length} parcelle(s)`);
+  }
+  if (!parcelles.length) { toast("Aucune parcelle rattachée (cadastre introuvable)", 1); return; }
+  const d = {
+    id: uuid(), code: codeDossier(), nom: "", commune: parcelles[0].commune || "", insee: parcelles[0].insee || "",
+    auteur: user.nom, auteurId: user.id, cree: new Date().toLocaleDateString("fr-FR"), statut: "",
+    donnees: { _contact: monContact(), _import: true }, parcelles, enregistre: false, brouillon: true, driveUrl: "", importe: true
+  };
+  d.nom = nomDossier(d);
+  dossiers.push(d); await dbPut("dossiers", d); dessinerProspections();
+  toast(`Dossier « ${d.nom} » : ${parcelles.length} parcelle(s). Zonage en cours…`);
+  // Zonage par parcelle, en arriere-plan, sans bloquer l'affichage.
+  for (const p of parcelles) if (p.etat === "ok" && !p.importLibre) { try { await chargerZonage(p); await dbPut("dossiers", d); } catch (e) {} }
+  dossierCourant = d; vueDossier = "fiche";
+  await enregistrerDossier(d);
+  dessinerProspections();
+  toast(`Import « ${d.nom} » terminé : ${parcelles.length} parcelle(s).`);
+}
+
 // ---- Documents des parcelles (scan/photo → Drive, signature, e-mail) ----
 let ctxDoc = null; // contexte de capture en cours
 function labelEtape(k) { const e = ETAPES.find(x => x.k === k); return e ? e.l : (k || ""); }
@@ -2026,6 +2128,7 @@ $("fichierPhoto").onchange = async e => {
   afficherPhotos(d, true);
 };
 $("fichierGpx").onchange = async e => { const f = e.target.files[0]; e.target.value = ""; if (f) await importerGpx(f); };
+$("fichierPoly").onchange = async e => { const f = e.target.files[0]; e.target.value = ""; if (f) await importerPolygones(f); };
 $("fichierDoc").onchange = async e => { const files = [...e.target.files]; e.target.value = ""; if (!ctxDoc || !files.length) return; const ctx = ctxDoc; ctxDoc = null; for (const f of files) await creerDocument(ctx, f); chargerDocuments(ctx.d, ctx.p); };
 function reduirePhoto(f) {
   return new Promise((ok, ko) => {
@@ -2458,10 +2561,18 @@ function tableauParcelles(d) {
 function fermerCartePresentation() { if (cpMap) { cpMap.remove(); cpMap = null; } const o = $("carteP"); if (o) o.remove(); }
 
 // ---- Prospections sur la carte --------------------------------
+// Dossiers masques sur la carte (surtout les imports, pour choisir lesquels afficher).
+let dossiersMasques = new Set(ls("pb6_masques", []));
+const estMasque = d => dossiersMasques.has(d.id);
+function basculerMasque(id) {
+  if (dossiersMasques.has(id)) dossiersMasques.delete(id); else dossiersMasques.add(id);
+  lss("pb6_masques", [...dossiersMasques]); dessinerProspections();
+}
 function dessinerProspections() {
   if (!gProspections) return;
   gProspections.clearLayers(); gInitiales.clearLayers(); gInitiales.addTo(gProspections);
   dossiers.forEach(d => {
+    if (estMasque(d)) return;
     const initiales = String(d.auteur || "").split(/\s+/).map(x => x[0] || "").join("").toUpperCase();
     // Parcelles des collegues : contour blanc et initiales, pour eviter de prospecter deux fois.
     const collegue = user && (d.auteurId ? d.auteurId !== user.id : d.auteur !== user.nom);
@@ -2512,14 +2623,29 @@ function texteRecherche(d) {
   return sansAccent([d.nom, d.code, d.commune, d.donnees.lieu_dit, d.auteur].concat(proprietairesDe(d), d.parcelles.map(p => sansZero(p.section) + " " + sansZero(p.numero) + " " + sansZero(p.section) + sansZero(p.numero))).join(" "));
 }
 function listeDossiers() {
-  const f = [["tous", "En cours"], ["moi", "Mes dossiers"], ["relance", "À relancer"], ["brouillon", "Brouillons"], ["archives", "🗄 Archives"]];
+  const f = [["tous", "En cours"], ["moi", "Mes dossiers"], ["relance", "À relancer"], ["brouillon", "Brouillons"], ["import", "📥 Imports"], ["archives", "🗄 Archives"]];
   ouvrirSheet("Dossiers prospection", `<input id="dRech" type="search" placeholder="Commune, n°, propriétaire, parcelle…" value="${esc(rechercheDossiers)}"><div class="filtres">${f.map(([k, l]) => `<button type="button" data-filtre="${k}" class="${k === filtreDossiers ? "on" : ""}">${l}</button>`).join("")}</div><div class="chips legende">${Object.keys(TYPES).map(chipType).join("")}</div><div id="dListe"></div>`, true);
   $("dRech").oninput = e => { rechercheDossiers = e.target.value; rendreListe(); };
   $("sheetCorps").querySelectorAll("[data-filtre]").forEach(b => b.onclick = () => { filtreDossiers = b.dataset.filtre; $("sheetCorps").querySelectorAll("[data-filtre]").forEach(x => x.classList.toggle("on", x === b)); rendreListe(); });
   rendreListe();
 }
+function rendreImports() {
+  const el = $("dListe"); if (!el) return;
+  const q = sansAccent(rechercheDossiers).trim().split(/\s+/).filter(Boolean);
+  const imps = [...dossiers].reverse().filter(d => estImport(d) && q.every(m => texteRecherche(d).includes(m)));
+  if (!imps.length) { el.innerHTML = `<p class="note">Aucun dossier importé. Menu profil → « Importer des parcelles ».</p>`; return; }
+  const tousVisibles = imps.every(d => !estMasque(d));
+  el.innerHTML = `<div class="imp-barre"><button class="btn btn2" id="impTous">${tousVisibles ? "🙈 Tout masquer" : "👁 Tout afficher"}</button></div>` + imps.map(d => {
+    const vis = !estMasque(d);
+    return `<div class="dossier-imp"><button class="oeil ${vis ? "on" : ""}" data-oeil="${esc(d.id)}" aria-label="${vis ? "Masquer sur la carte" : "Afficher sur la carte"}">${vis ? "👁" : "🙈"}</button><button class="dossier" data-d="${esc(d.id)}"><b>${esc(d.nom)}</b><small>${d.parcelles.length} parcelle(s) · ${esc(d.cree)}</small></button></div>`;
+  }).join("");
+  el.querySelectorAll("[data-d]").forEach(b => b.onclick = () => ouvrirDossier(dossiers.find(x => x.id === b.dataset.d)));
+  el.querySelectorAll("[data-oeil]").forEach(b => b.onclick = () => { basculerMasque(b.dataset.oeil); rendreImports(); });
+  const bt = $("impTous"); if (bt) bt.onclick = () => { const cacher = imps.every(d => !estMasque(d)); imps.forEach(d => { if (cacher) dossiersMasques.add(d.id); else dossiersMasques.delete(d.id); }); lss("pb6_masques", [...dossiersMasques]); dessinerProspections(); rendreImports(); };
+}
 function rendreListe() {
   if (filtreDossiers === "archives") { listeArchives(); return; }
+  if (filtreDossiers === "import") { rendreImports(); return; }
   const q = sansAccent(rechercheDossiers).trim().split(/\s+/).filter(Boolean);
   const l = [...dossiers].reverse().filter(d => {
     if (filtreDossiers === "moi" && d.auteurId !== user.id) return false;
@@ -2538,7 +2664,8 @@ $("btnDossiers").onclick = listeDossiers;
 $("btnAgenda").onclick = ouvrirAgenda;
 $("btnCompte").onclick = async () => {
   const n = await nbAttente();
-  ouvrirSheet(user.nom, `<div class="ligne"><span>Identifiant</span><span>${esc(user.id)}</span></div><div class="ligne"><span>En attente d'envoi</span><span>${n}</span></div><h3>Coordonnées reprises dans les courriers</h3><label for="cEmail">E-mail</label><input id="cEmail" type="email" value="${esc(user.email || "")}"><label for="cTel" style="margin-top:10px">Téléphone</label><input id="cTel" type="tel" value="${esc(user.tel || "")}"><button class="btn btn2" id="cProfil">Enregistrer mes coordonnées</button><h3>Suivi</h3><div class="ligne"><span>Rappel par e-mail après</span><span>${delaiRappel()} jours sans action</span></div><p class="note">Délai commun à l'équipe, modifiable dans l'onglet « Reglages » du Google Sheets.</p><h3>Application</h3>${n ? `<div class="alerte">⚠️ ${n} enregistrement(s) pas encore envoyé(s). Restez sur le réseau et ne supprimez pas l'appli tant que ce n'est pas à zéro.</div>` : ""}<button class="btn btn2" id="cSync">🔄 Synchroniser</button><button class="btn btn2" id="cSauve">💾 Sauvegarder mes données (fichier)</button><p class="note">La sauvegarde télécharge une copie de tous tes dossiers. À faire avant toute mise à jour ou réinstallation, par sécurité.</p><h3>Import / export GPX</h3><button class="btn btn2" id="cGpxImp">📥 Importer un fichier GPX</button><button class="btn btn2" id="cGpxExp">📤 Exporter tout en GPX</button><p class="note">Points → repères, traces → traces, parcelles → contours. Compatible Iphigénie, QGIS, GPS…</p>${user.sheetUrl ? `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(user.sheetUrl)}" target="_blank" rel="noopener">Ouvrir le Google Sheets</a>` : ""}<button class="btn danger" id="cDeco">Se déconnecter</button>`);
+  ouvrirSheet(user.nom, `<div class="ligne"><span>Identifiant</span><span>${esc(user.id)}</span></div><div class="ligne"><span>En attente d'envoi</span><span>${n}</span></div><h3>Coordonnées reprises dans les courriers</h3><label for="cEmail">E-mail</label><input id="cEmail" type="email" value="${esc(user.email || "")}"><label for="cTel" style="margin-top:10px">Téléphone</label><input id="cTel" type="tel" value="${esc(user.tel || "")}"><button class="btn btn2" id="cProfil">Enregistrer mes coordonnées</button><h3>Suivi</h3><div class="ligne"><span>Rappel par e-mail après</span><span>${delaiRappel()} jours sans action</span></div><p class="note">Délai commun à l'équipe, modifiable dans l'onglet « Reglages » du Google Sheets.</p><h3>Application</h3>${n ? `<div class="alerte">⚠️ ${n} enregistrement(s) pas encore envoyé(s). Restez sur le réseau et ne supprimez pas l'appli tant que ce n'est pas à zéro.</div>` : ""}<button class="btn btn2" id="cSync">🔄 Synchroniser</button><button class="btn btn2" id="cSauve">💾 Sauvegarder mes données (fichier)</button><p class="note">La sauvegarde télécharge une copie de tous tes dossiers. À faire avant toute mise à jour ou réinstallation, par sécurité.</p><h3>Importer des parcelles (polygones)</h3><button class="btn btn2" id="cPolyImp">📥 Importer KML, GeoJSON, Shapefile, GPX</button><p class="note">Chaque polygone est rattaché au cadastre (section, n°, zonage) et crée un dossier « IMPORT ». KMZ et Shapefile (.zip) acceptés. Depuis QGIS ou Iphigénie.</p><h3>Import / export GPX</h3><button class="btn btn2" id="cGpxImp">📥 Importer un fichier GPX</button><button class="btn btn2" id="cGpxExp">📤 Exporter tout en GPX</button><p class="note">Points → repères, traces → traces, parcelles → contours. Compatible Iphigénie, QGIS, GPS…</p>${user.sheetUrl ? `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(user.sheetUrl)}" target="_blank" rel="noopener">Ouvrir le Google Sheets</a>` : ""}<button class="btn danger" id="cDeco">Se déconnecter</button>`);
+  $("cPolyImp").onclick = () => demanderImportPoly();
   $("cGpxImp").onclick = () => $("fichierGpx").click();
   $("cGpxExp").onclick = () => exporterGpx(null);
   $("cSync").onclick = async () => { await synchroniser(); toast("Synchronisation terminée"); };
