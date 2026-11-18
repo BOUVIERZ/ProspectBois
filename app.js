@@ -326,7 +326,7 @@ $("lOk").onclick = async function () {
   if (res.error === "bloque") { err.textContent = "Trop d'essais. Réessayez dans 15 minutes."; return; }
   if (res.error === "identifiants") { err.textContent = "Identifiant ou mot de passe incorrect"; return; }
   if (!res.success) { err.textContent = res.error || "Erreur du serveur"; return; }
-  user = { id: res.id, nom: res.nom, token: res.token, sheetUrl: res.sheetUrl || "", email: res.email || "", tel: res.tel || "" };
+  user = { id: res.id, nom: res.nom, token: res.token, sheetUrl: res.sheetUrl || "", email: res.email || "", tel: res.tel || "", emailPerso: (ls("pb5_user", {}) || {}).emailPerso || "" };
   lss("pb5_user", user);
   ["lMdp", "lMdp2", "lInvit", "lNom", "lEmail", "lTel"].forEach(i => $(i).value = "");
   modeInscription(false);
@@ -781,7 +781,8 @@ let gpsPoint, gpsCercle, gpsPrec = null, ecouteursGps = [], collecteMoyen = null
 const classePrec = m => m == null ? "" : m <= 5 ? "ok" : m <= 12 ? "moy" : "bof";
 function majGpsPrec() {
   const el = $("gpsPrec"); if (!el) return;
-  if (gpsPrec == null || gpsWatch === null) { el.hidden = true; return; }
+  // Le badge de précision ne s'affiche que quand l'outil Précision est actif (pour la délimitation).
+  if (gpsPrec == null || gpsWatch === null || typeof outil === "undefined" || outil !== "precision") { el.hidden = true; return; }
   el.hidden = false;
   el.textContent = "📍 ±" + (gpsPrec < 10 ? gpsPrec.toFixed(1) : Math.round(gpsPrec)) + " m";
   el.className = "gpsprec " + classePrec(gpsPrec);
@@ -944,7 +945,7 @@ function bandeau(txt, boutons) {
 function choisirOutil(o) {
   if (outil === "trace" && traceActive && o !== "trace") { toast("Arrêtez d'abord la trace en cours", 1); return; }
   annulerPointMoyen(); arreterGuidage();
-  outil = o; gTemp.clearLayers(); ptsDessin = []; enAjout = false; bandeau(null);
+  outil = o; gTemp.clearLayers(); ptsDessin = []; enAjout = false; bandeau(null); majGpsPrec();
   document.querySelectorAll("[data-outil]").forEach(b => b.classList.toggle("on", b.dataset.outil === o));
   if (o !== "info" && o !== "saisie") gSel.clearLayers();
   if (!map) return;
@@ -1825,7 +1826,7 @@ function afficherFiche(d) {
   if (d.parcelles.some(p => p.geom)) h += `<button class="btn" id="fCarte" type="button">🗺️ Carte de présentation (PDF)</button>`;
   if (d.parcelles.some(p => p.geom)) h += `<button class="btn btn2" id="fGpx" type="button">📤 Exporter ce dossier en GPX</button>`;
   h += `<h3>Récapitulatif complet</h3><p class="note">Peuplement, zonage et réglementation réunis sur une fiche : aperçu à l'écran, téléchargement Word ou envoi par e-mail. La fiche est aussi classée automatiquement dans le dossier Drive.</p>`;
-  h += `<div class="boutons"><button class="btn" id="fApercu" type="button">👁 Aperçu de la fiche</button></div><div class="boutons"><button class="btn btn2" id="fWord" type="button">📄 Télécharger (Word)</button><button class="btn btn2" id="fMail" type="button">✉️ Par e-mail</button></div>`;
+  h += `<div class="boutons"><button class="btn" id="fApercu" type="button">👁 Aperçu de la fiche</button></div><div class="boutons"><button class="btn btn2" id="fWord" type="button">📄 Télécharger (Word)</button><button class="btn btn2" id="fMail" type="button">✉️ Par e-mail</button></div><div class="boutons"><button class="btn btn2" id="fDrive" type="button">💾 Enregistrer la fiche dans le Drive</button></div>`;
   if (arch) h += `<button class="btn btn2" id="fRestaurer" type="button">↩️ Remettre dans l'appli</button>`;
   else if (peutGererDossier(d)) h += peutEditer() ? `<button class="btn btn2" id="fModif" type="button">✏️ Modifier la saisie</button>` : `<p class="note">Déverrouillez le cadenas 🔓 pour modifier la saisie. Le suivi se renseigne à tout moment.</p>`;
   else h += `<p class="note">Dossier de ${esc(d.auteur)} : suivi en lecture seule. ${esc(d.auteur)} peut vous ouvrir la gestion depuis « Partage ».</p>`;
@@ -1878,6 +1879,7 @@ function htmlDetailSuivi(p, d) {
     if (!fait && !bloque && !e.choix) h += `<button type="button" class="mini" data-auj="${esc(e.k)}" ${dis}>Aujourd'hui</button>`;
     h += `<button type="button" class="mini-doc" data-doc="${esc(e.k)}" data-pidu="${esc(p.idu)}" ${dis} title="Scanner / photographier un document pour cette étape">📷</button>`;
     h += `</div>`;
+    h += `<div class="vignettes" id="vg-${esc(p.idu)}-${esc(e.k)}"></div>`;
     if (e.k === "contact") {
       h += `<div class="groupe"><label>Réponse / suite donnée</label><textarea rows="2" data-sv="reponse" placeholder="Ex. OK pour couper · à rappeler · ne souhaite pas…" ${dis}>${esc((f.reponse || {}).v || "")}</textarea></div>`;
       h += `<div class="groupe"><label>Date de relance</label><input type="date" data-sv="relance" value="${esc((f.relance || {}).v || "")}" ${dis}></div>`;
@@ -1888,7 +1890,7 @@ function htmlDetailSuivi(p, d) {
   });
   h += `</div>`;
   // Documents de la parcelle : scans/photos rangés dans le sous-dossier Drive, + ceux déposés dans le Drive.
-  h += `<div class="groupe"><label>Documents de la parcelle</label><button type="button" class="btn btn2" data-docadd="${esc(p.idu)}" ${dis}>📷 Scanner / photographier un document</button><div class="docs-parc" id="docs-${esc(p.idu)}"><p class="note">Chargement…</p></div></div>`;
+  h += `<div class="groupe"><label>Documents de la parcelle</label><button type="button" class="btn btn2" data-docadd="${esc(p.idu)}" ${dis}>📷 Scanner / photographier un document</button><a class="btn btn2" id="driveparc-${esc(p.idu)}" href="#" target="_blank" rel="noopener" hidden style="text-align:center;text-decoration:none">📁 Ouvrir le dossier Drive de la parcelle</a><div class="docs-parc" id="docs-${esc(p.idu)}"><p class="note">Chargement…</p></div></div>`;
   const cl = f.cloture || {};
   h += `<div class="groupe"><label>Clôturer le suivi</label><div class="choix petit">${["Terminé", "Abandonné"].map(c => `<button type="button" data-clot="${c}" class="${cl.v && cl.r === c ? "on" : ""}" ${dis}>${c}</button>`).join("")}</div></div>`;
   h += `<div class="groupe"><label>Notes</label>${s.notes.filter(n => !n.del).map(n => `<div class="note-suivi"><small>${frDate(n.date)} · ${esc(n.par || "")}</small>${esc(n.txt)}</div>`).join("") || `<p class="note">Aucune note.</p>`}<textarea rows="2" data-note placeholder="Appel, échange, remarque…" ${dis}></textarea><button type="button" class="btn btn2" data-ajnote ${dis}>Ajouter la note</button></div>`;
@@ -1960,6 +1962,7 @@ function brancherFiche(d) {
   if ($("fApercu")) $("fApercu").onclick = () => apercuRecap(d);
   $("fWord").onclick = async () => { telecharger(await ficheDossier(d)); classerFicheDrive(d); };
   $("fMail").onclick = async () => { await envoyerParMail(await ficheDossier(d), `Fiche récapitulative ${d.nom}`); classerFicheDrive(d); };
+  if ($("fDrive")) $("fDrive").onclick = async () => { if (!d.enregistre) { toast("Enregistre d'abord le dossier", 1); return; } await classerFicheDrive(d); toast("Fiche récapitulative classée dans le Drive"); };
   if ($("fCarte")) $("fCarte").onclick = () => cartePresentation(d);
   if ($("fGpx")) $("fGpx").onclick = () => exporterGpx(d);
   if ($("fRestaurer")) $("fRestaurer").onclick = () => restaurer(d);
@@ -1975,14 +1978,8 @@ function brancherFiche(d) {
     // Documents : capture (scan/photo), ouverture, signature, e-mail.
     const bdoc = t.closest("[data-doc]"); if (bdoc) { if (peutSuivre(d)) demanderDocument(d, parc(bdoc.dataset.pidu), bdoc.dataset.doc); return; }
     const badd = t.closest("[data-docadd]"); if (badd) { if (peutSuivre(d)) demanderDocument(d, parc(badd.dataset.docadd), ""); return; }
-    const dact = t.closest("[data-opendoc],[data-signdoc],[data-maildoc]");
-    if (dact) {
-      const cont = t.closest(".docs-parc"), items = (cont && cont._items) || [], pp = cont && parc(cont.id.slice(5));
-      if (dact.dataset.opendoc != null) { const it = items[+dact.dataset.opendoc]; if (it && it.local) window.open(URL.createObjectURL(it.local.blob), "_blank"); }
-      else if (dact.dataset.signdoc != null) { const it = items[+dact.dataset.signdoc]; if (it && peutSuivre(d)) signerDocument(it, pp, d); }
-      else if (dact.dataset.maildoc != null) { const it = items[+dact.dataset.maildoc]; if (it) envoyerDocumentMail(it, pp); }
-      return;
-    }
+    const vg = t.closest("[data-vdoc]");
+    if (vg) { const items = _docsP[vg.dataset.pidu] || [], it = items[+vg.dataset.vdoc], pp = parc(vg.dataset.pidu); if (it && pp) ouvrirDocument(it, pp, d); return; }
     const carte = t.closest("[data-carte]"); if (!carte || !peutSuivre(d)) return;
     const p = parc(carte.dataset.carte);
     if (t.dataset.auj) { await majSuivi(d, p, t.dataset.auj, { v: isoJour() }); return; }
@@ -2167,22 +2164,57 @@ async function creerDocument(ctx, file) {
   return doc;
 }
 async function docsLocaux(idu) { return (await dbAll("documents")).filter(x => x.idu === idu); }
-// Liste combinee locale + Drive pour une parcelle (le lien Drive↔appli se fait tout seul).
+let _docsP = {}; // items de documents par idu de parcelle (pour l'ouverture au clic sur une vignette)
+function vignetteHtml(it, i, pidu) {
+  const img = (it.mime || "").startsWith("image/");
+  const src = (it.local && img) ? URL.createObjectURL(it.local.blob) : "";
+  const media = src ? `<img src="${src}" alt="" loading="lazy">` : `<span class="v-ico">${img ? "🖼️" : "📄"}</span>`;
+  return `<button type="button" class="vign" data-vdoc="${i}" data-pidu="${esc(pidu)}" title="${esc(it.nom)}">${media}${it.surDrive ? "" : `<span class="v-wait" title="Envoi en cours…">⏳</span>`}</button>`;
+}
+// Documents d'une parcelle (local + Drive), affichés en miniatures sous l'étape concernée.
 async function chargerDocuments(d, p) {
-  const cont = $("docs-" + p.idu); if (!cont) return;
   const loc = await docsLocaux(p.idu);
-  let drive = [];
-  try { const r = await apiGet({ action: "get_documents", dossierId: d.id, dossierNom: d.nom, parcelle: labelParcelleDrive(p) }); if (r && r.documents) drive = r.documents; } catch (e) {}
+  let drive = [], folderUrl = "";
+  try { const r = await apiGet({ action: "get_documents", dossierId: d.id, dossierNom: d.nom, parcelle: labelParcelleDrive(p) }); if (r && r.documents) drive = r.documents; if (r && r.folderUrl) folderUrl = r.folderUrl; } catch (e) {}
+  const lk = $("driveparc-" + p.idu); if (lk) { if (folderUrl) { lk.href = folderUrl; lk.hidden = false; } else lk.hidden = true; }
   const noms = new Set(loc.map(x => x.nom));
-  const items = loc.map(x => ({ local: x, nom: x.nom, etape: x.etape, date: x.date, mime: x.mime, surDrive: drive.some(y => y.nom === x.nom) }))
-    .concat(drive.filter(y => !noms.has(y.nom)).map(y => ({ drive: y, nom: y.nom, date: (y.date || "").slice(0, 10), mime: y.mime, surDrive: true })));
-  cont._items = items;
-  if (!items.length) { cont.innerHTML = `<p class="note">Aucun document. Scanne ou photographie un document sous une étape : il est rangé dans le sous-dossier Drive de la parcelle. Un document déposé dans ce dossier Drive apparaît aussi ici.</p>`; return; }
-  cont.innerHTML = items.map((it, i) => {
-    const img = (it.mime || "").startsWith("image/");
-    const voir = it.local ? `<button data-opendoc="${i}" title="Ouvrir">👁</button>${img ? `<button data-signdoc="${i}" title="Remplir / signer">✍️</button>` : ""}` : `<a href="${esc(it.drive.url)}" target="_blank" rel="noopener" title="Ouvrir dans Drive">👁</a>`;
-    return `<div class="doc-item"><span class="doc-ico">${img ? "🖼️" : "📄"}</span><div class="doc-txt"><b>${esc(it.nom)}</b><small>${it.etape ? esc(labelEtape(it.etape)) + " · " : ""}${esc(it.date || "")}${it.surDrive ? " · ✓ Drive" : " · ⏳ envoi…"}</small></div><div class="doc-act">${voir}<button data-maildoc="${i}" title="Envoyer par e-mail">✉️</button></div></div>`;
-  }).join("");
+  const items = loc.map(x => ({ local: x, nom: x.nom, etape: x.etape || "", date: x.date, mime: x.mime, surDrive: drive.some(y => y.nom === x.nom) }))
+    .concat(drive.filter(y => !noms.has(y.nom)).map(y => ({ drive: y, nom: y.nom, etape: y.etape || "", date: (y.date || "").slice(0, 10), mime: y.mime, surDrive: true })));
+  _docsP[p.idu] = items;
+  const prefixe = "vg-" + p.idu + "-";
+  const conteneurs = [].slice.call(document.querySelectorAll(`[id^="${prefixe}"]`));
+  const clesEtapes = new Set(conteneurs.map(c => c.id.slice(prefixe.length)));
+  conteneurs.forEach(c => {
+    const k = c.id.slice(prefixe.length);
+    const lot = items.map((it, i) => [it, i]).filter(([it]) => it.etape === k);
+    c.innerHTML = lot.map(([it, i]) => vignetteHtml(it, i, p.idu)).join("");
+    c.hidden = !lot.length;
+  });
+  const cont = $("docs-" + p.idu);
+  if (cont) {
+    cont._items = items;
+    const autres = items.map((it, i) => [it, i]).filter(([it]) => !clesEtapes.has(it.etape));
+    cont.innerHTML = autres.length ? `<div class="vignettes">${autres.map(([it, i]) => vignetteHtml(it, i, p.idu)).join("")}</div>`
+      : `<p class="note">Aucun autre document. Un scan/photo pris sous une étape apparaît en miniature juste sous cette étape ; touchez-la pour l'ouvrir, la modifier ou l'envoyer.</p>`;
+  }
+}
+// Visualiseur d'un document : voir en grand, modifier/signer, enregistrer, envoyer par e-mail.
+function ouvrirDocument(it, p, d) {
+  const img = (it.mime || "").startsWith("image/");
+  const o = document.createElement("div"); o.id = "docView"; o.className = "doc-plein";
+  const media = (it.local && img) ? `<img src="${URL.createObjectURL(it.local.blob)}" alt="${esc(it.nom)}">`
+    : it.drive ? `<div class="doc-pdf"><span>📄</span><b>${esc(it.nom)}</b><a class="btn btn2" href="${esc(it.drive.url)}" target="_blank" rel="noopener">Ouvrir dans Drive</a></div>`
+    : `<div class="doc-pdf"><span>📄</span><b>${esc(it.nom)}</b></div>`;
+  o.innerHTML = `<div class="cp-barre"><b class="dv-nom">${esc(it.nom)}</b><span class="dv-sp"></span>`
+    + `${(img && it.local && peutSuivre(d)) ? `<button class="btn btn2" id="dvEdit">✍️ Modifier</button>` : ""}`
+    + `${it.local ? `<button class="btn btn2" id="dvSave">💾 Enregistrer</button>` : ""}`
+    + `<button class="btn btn2" id="dvMail">✉️ Envoyer</button><button class="btn" id="dvClose">Fermer</button></div>`
+    + `<div class="doc-zone">${media}</div>`;
+  document.body.appendChild(o);
+  $("dvClose").onclick = () => o.remove();
+  if ($("dvEdit")) $("dvEdit").onclick = () => { o.remove(); signerDocument(it, p, d); };
+  if ($("dvSave")) $("dvSave").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(it.local.blob); a.download = it.nom; document.body.appendChild(a); a.click(); a.remove(); };
+  $("dvMail").onclick = () => { o.remove(); envoyerDocumentMail(it, p); };
 }
 // Envoi d'un document par e-mail (proprietaire, soi, ou autre adresse).
 function envoyerDocumentMail(it, p) {
@@ -2190,12 +2222,13 @@ function envoyerDocumentMail(it, p) {
   ouvrirSheet("Envoyer le document", `<div class="ligne"><span>Document</span><span>${esc(it.nom)}</span></div><h3>Destinataire</h3>`
     + `<label class="radio"><input type="radio" name="dest" value="prop" ${emailProp ? "checked" : "disabled"}> Propriétaire ${emailProp ? "(" + esc(emailProp) + ")" : "— e-mail non renseigné"}</label>`
     + `<label class="radio"><input type="radio" name="dest" value="moi" ${emailProp ? "" : "checked"}> Moi (${esc(user.email || "e-mail non renseigné")})</label>`
+    + `<label class="radio"><input type="radio" name="dest" value="perso" ${user.emailPerso ? "" : "disabled"}> Ma boîte perso ${user.emailPerso ? "(" + esc(user.emailPerso) + ")" : "— à renseigner dans Compte 👤"}</label>`
     + `<label class="radio"><input type="radio" name="dest" value="autre"> Autre adresse</label><input id="mdAutre" type="email" placeholder="adresse@exemple.fr">`
     + `<label style="margin-top:10px">Message</label><textarea id="mdMsg" rows="3">Bonjour,\n\nVeuillez trouver ci-joint le document concernant votre parcelle.\n\nCordialement,\n${esc(user.nom)}</textarea>`
     + `<button class="btn" id="mdOk">✉️ Envoyer</button>`);
   $("mdOk").onclick = async () => {
     const dest = ([...document.querySelectorAll("[name=dest]")].find(x => x.checked) || {}).value;
-    const to = dest === "prop" ? emailProp : dest === "moi" ? user.email : $("mdAutre").value.trim();
+    const to = dest === "prop" ? emailProp : dest === "moi" ? user.email : dest === "perso" ? user.emailPerso : $("mdAutre").value.trim();
     if (!to) { toast("Adresse e-mail manquante", 1); return; }
     const payload = { action: "envoyer_document", to, sujet: "Document — " + it.nom, message: $("mdMsg").value, nom: it.nom, mime: it.mime };
     if (it.local) payload.base64 = await b64(it.local.blob); else payload.fileId = it.drive.id;
@@ -2793,7 +2826,7 @@ $("btnDossiers").onclick = listeDossiers;
 $("btnAgenda").onclick = ouvrirAgenda;
 $("btnCompte").onclick = async () => {
   const n = await nbAttente();
-  ouvrirSheet(user.nom, `<div class="ligne"><span>Identifiant</span><span>${esc(user.id)}</span></div><div class="ligne"><span>En attente d'envoi</span><span>${n}</span></div><h3>Coordonnées reprises dans les courriers</h3><label for="cEmail">E-mail</label><input id="cEmail" type="email" value="${esc(user.email || "")}"><label for="cTel" style="margin-top:10px">Téléphone</label><input id="cTel" type="tel" value="${esc(user.tel || "")}"><button class="btn btn2" id="cProfil">Enregistrer mes coordonnées</button><h3>Suivi</h3><div class="ligne"><span>Rappel par e-mail après</span><span>${delaiRappel()} jours sans action</span></div><p class="note">Délai commun à l'équipe, modifiable dans l'onglet « Reglages » du Google Sheets.</p><h3>Application</h3>${n ? `<div class="alerte">⚠️ ${n} enregistrement(s) pas encore envoyé(s). Restez sur le réseau et ne supprimez pas l'appli tant que ce n'est pas à zéro.</div>` : ""}<button class="btn btn2" id="cSync">🔄 Synchroniser</button><button class="btn btn2" id="cSauve">💾 Sauvegarder mes données (fichier)</button><p class="note">La sauvegarde télécharge une copie de tous tes dossiers. À faire avant toute mise à jour ou réinstallation, par sécurité.</p><h3>Importer des parcelles (polygones)</h3><button class="btn btn2" id="cPolyImp">📥 Importer KML, GeoJSON, Shapefile, GPX</button><p class="note">Chaque polygone est rattaché au cadastre (section, n°, zonage) et crée un dossier « IMPORT ». KMZ et Shapefile (.zip) acceptés. Depuis QGIS ou Iphigénie.</p><h3>Import / export GPX</h3><button class="btn btn2" id="cGpxImp">📥 Importer un fichier GPX</button><button class="btn btn2" id="cGpxExp">📤 Exporter tout en GPX</button><p class="note">Points → repères, traces → traces, parcelles → contours. Compatible Iphigénie, QGIS, GPS…</p>${user.sheetUrl ? `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(user.sheetUrl)}" target="_blank" rel="noopener">Ouvrir le Google Sheets</a>` : ""}<button class="btn danger" id="cDeco">Se déconnecter</button>`);
+  ouvrirSheet(user.nom, `<div class="ligne"><span>Identifiant</span><span>${esc(user.id)}</span></div><div class="ligne"><span>En attente d'envoi</span><span>${n}</span></div><h3>Coordonnées reprises dans les courriers</h3><label for="cEmail">E-mail</label><input id="cEmail" type="email" value="${esc(user.email || "")}"><label for="cTel" style="margin-top:10px">Téléphone</label><input id="cTel" type="tel" value="${esc(user.tel || "")}"><label for="cPerso" style="margin-top:10px">E-mail perso (pour recevoir tes documents)</label><input id="cPerso" type="email" placeholder="adresse@perso.fr" value="${esc(user.emailPerso || "")}"><button class="btn btn2" id="cProfil">Enregistrer mes coordonnées</button><h3>Suivi</h3><div class="ligne"><span>Rappel par e-mail après</span><span>${delaiRappel()} jours sans action</span></div><p class="note">Délai commun à l'équipe, modifiable dans l'onglet « Reglages » du Google Sheets.</p><h3>Application</h3>${n ? `<div class="alerte">⚠️ ${n} enregistrement(s) pas encore envoyé(s). Restez sur le réseau et ne supprimez pas l'appli tant que ce n'est pas à zéro.</div>` : ""}<button class="btn btn2" id="cSync">🔄 Synchroniser</button><button class="btn btn2" id="cSauve">💾 Sauvegarder mes données (fichier)</button><p class="note">La sauvegarde télécharge une copie de tous tes dossiers. À faire avant toute mise à jour ou réinstallation, par sécurité.</p><h3>Importer des parcelles (polygones)</h3><button class="btn btn2" id="cPolyImp">📥 Importer KML, GeoJSON, Shapefile, GPX</button><p class="note">Chaque polygone est rattaché au cadastre (section, n°, zonage) et crée un dossier « IMPORT ». KMZ et Shapefile (.zip) acceptés. Depuis QGIS ou Iphigénie.</p><h3>Import / export GPX</h3><button class="btn btn2" id="cGpxImp">📥 Importer un fichier GPX</button><button class="btn btn2" id="cGpxExp">📤 Exporter tout en GPX</button><p class="note">Points → repères, traces → traces, parcelles → contours. Compatible Iphigénie, QGIS, GPS…</p>${user.sheetUrl ? `<a class="btn btn2" style="text-align:center;text-decoration:none" href="${esc(user.sheetUrl)}" target="_blank" rel="noopener">Ouvrir le Google Sheets</a>` : ""}<button class="btn danger" id="cDeco">Se déconnecter</button>`);
   $("cPolyImp").onclick = () => demanderImportPoly();
   $("cGpxImp").onclick = () => $("fichierGpx").click();
   $("cGpxExp").onclick = () => exporterGpx(null);
@@ -2801,10 +2834,10 @@ $("btnCompte").onclick = async () => {
   $("cDeco").onclick = deconnexion;
   $("cSauve").onclick = exporterSauvegarde;
   $("cProfil").onclick = async () => {
-    const email = $("cEmail").value.trim(), tel = $("cTel").value.trim();
+    const email = $("cEmail").value.trim(), tel = $("cTel").value.trim(), perso = $("cPerso").value.trim();
     const r = await apiPost({ action: "update_profil", email, tel });
     if (!r || !r.success) { toast(r && r.error ? r.error : "Réseau nécessaire pour enregistrer", 1); return; }
-    user.email = email; user.tel = tel; lss("pb5_user", user); toast("Coordonnées enregistrées");
+    user.email = email; user.tel = tel; user.emailPerso = perso; lss("pb5_user", user); toast("Coordonnées enregistrées");
   };
 };
 
